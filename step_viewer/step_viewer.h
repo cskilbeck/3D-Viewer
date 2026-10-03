@@ -125,7 +125,7 @@ struct step_viewer : gpu_window
     std::jthread loader;
 
     void check_loaded();
-    void model_tree_ui(int node_index);
+    void model_tree_ui(int node_index, bool parent_visible);
 
     settings_t settings;
 

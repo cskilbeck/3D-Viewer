@@ -28,6 +28,7 @@ struct step_node
     std::string name;
     bool is_assembly{ false };
     bool has_color{ false };
+    bool visible{ true };    // its own setting, it's only shown if its ancestors are visible too
     float color[3]{};
     int parent{ -1 };
     std::vector<int> children;    // indices into step_model::nodes
@@ -42,8 +43,9 @@ struct pick_hit
     float distance;
 };
 
-// a part instance's geometry within the model's vertices/indices
+// a part instance's geometry within the model's vertices/indices/edges
 // opaque triangles are in one range, transparent ones (if any) in another
+// parts are in order, so each kind of range goes up from one part to the next
 
 struct step_part
 {
@@ -52,8 +54,11 @@ struct step_part
     uint32_t num_indices{};
     uint32_t first_transparent_index{};
     uint32_t num_transparent_indices{};
+    uint32_t first_edge_vertex{};
+    uint32_t num_edge_vertices{};
     gpu::vec3 bounds_min{};
     gpu::vec3 bounds_max{};
+    bool visible{ true };    // its node and all of the node's ancestors are visible
 };
 
 //////////////////////////////////////////////////////////////////////
@@ -109,14 +114,20 @@ struct step_model
     double read_time{};
     double mesh_time{};
 
-    // parts hit by a ray (in vertex space - relative to center), nearest first
+    // visible parts hit by a ray (in vertex space - relative to center), nearest first
     std::vector<pick_hit> pick(gpu::vec3 const &origin, gpu::vec3 const &direction) const;
+
+    // show/hide a node (and so everything under it)
+    void set_visible(int node, bool visible);
 
     // all the parts in (and under) a node
     void get_parts(int node, std::vector<int> &parts_out) const;
 
     // is ancestor an ancestor of node (or node itself)
     bool is_ancestor(int ancestor, int node) const;
+
+private:
+    void update_visibility(int node, bool parent_visible);
 };
 
 //////////////////////////////////////////////////////////////////////

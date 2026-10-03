@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <utility>
 
 #include "log.h"
 #include "step_model.h"
@@ -34,6 +35,31 @@ namespace
             }
         }
         return SDL_GPU_SAMPLECOUNT_1;
+    }
+
+    //////////////////////////////////////////////////////////////////////
+    // draw(first, count) for everything in 0..total except the hidden parts' ranges,
+    // so it's one draw when nothing's hidden. range(part) gets a part's {first, count},
+    // parts are in order so the ranges are too. Anything which isn't in a part is drawn
+
+    template <typename range_fn, typename draw_fn>
+    void draw_visible(uint32_t total, std::vector<step_part> const *parts, range_fn range, draw_fn draw)
+    {
+        uint32_t start = 0;
+        if(parts != nullptr) {
+            for(step_part const &part : *parts) {
+                if(!part.visible) {
+                    auto [first, count] = range(part);
+                    if(first > start) {
+                        draw(start, first - start);
+                    }
+                    start = std::max(start, first + count);
+                }
+            }
+        }
+        if(total > start) {
+            draw(start, total - start);
+        }
     }
 
 }    // namespace
@@ -347,9 +373,11 @@ void model_renderer::render(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *swapchain
 
             color_uniforms no_tint{};
             SDL_PushGPUFragmentUniformData(cmd, 0, &no_tint, sizeof(no_tint));
-            if(num_opaque_indices != 0) {
-                SDL_DrawGPUIndexedPrimitives(pass, num_opaque_indices, 1, 0, 0, 0);
-            }
+            draw_visible(
+                num_opaque_indices,
+                params.parts,
+                [](step_part const &part) { return std::pair{ part.first_index, part.num_indices }; },
+                [&](uint32_t first, uint32_t count) { SDL_DrawGPUIndexedPrimitives(pass, count, 1, first, 0, 0); });
 
             // selected parts again on top, tinted
             if(params.parts != nullptr && params.selected_parts != nullptr && !params.selected_parts->empty()) {
@@ -358,7 +386,7 @@ void model_renderer::render(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *swapchain
                 SDL_PushGPUFragmentUniformData(cmd, 0, &tint, sizeof(tint));
                 for(int part_index : *params.selected_parts) {
                     step_part const &part = (*params.parts)[part_index];
-                    if(part.num_indices != 0) {
+                    if(part.visible && part.num_indices != 0) {
                         SDL_DrawGPUIndexedPrimitives(pass, part.num_indices, 1, part.first_index, 0, 0);
                     }
                 }
@@ -373,7 +401,11 @@ void model_renderer::render(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *swapchain
             SDL_PushGPUFragmentUniformData(cmd, 0, &edge, sizeof(edge));
             SDL_GPUBufferBinding vertices{ edge_buffer, 0 };
             SDL_BindGPUVertexBuffers(pass, 0, &vertices, 1);
-            SDL_DrawGPUPrimitives(pass, num_edge_vertices, 1, 0, 0);
+            draw_visible(
+                num_edge_vertices,
+                params.parts,
+                [](step_part const &part) { return std::pair{ part.first_edge_vertex, part.num_edge_vertices }; },
+                [&](uint32_t first, uint32_t count) { SDL_DrawGPUPrimitives(pass, count, 1, first, 0); });
         }
 
         // transparent parts, furthest first
@@ -381,7 +413,7 @@ void model_renderer::render(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *swapchain
             std::vector<std::pair<float, int>> order;
             for(int i = 0; i < (int)params.parts->size(); ++i) {
                 step_part const &part = (*params.parts)[i];
-                if(part.num_transparent_indices != 0) {
+                if(part.visible && part.num_transparent_indices != 0) {
                     gpu::vec3 middle = (part.bounds_min + part.bounds_max) * 0.5f;
                     order.emplace_back((middle - params.eye).length(), i);
                 }

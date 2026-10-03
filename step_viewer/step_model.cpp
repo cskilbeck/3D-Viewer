@@ -274,12 +274,14 @@ namespace
             step_part part;
             part.node = node_index;
             part.first_index = (uint32_t)model.indices.size();
+            part.first_edge_vertex = (uint32_t)model.edges.size();
             size_t first_vertex = model.vertices.size();
             transparent_indices.clear();
 
             add_shape(shape, location, color.value_or(default_color), face_colors);
 
             part.num_indices = (uint32_t)model.indices.size() - part.first_index;
+            part.num_edge_vertices = (uint32_t)model.edges.size() - part.first_edge_vertex;
             if(part.num_indices != 0 || !transparent_indices.empty()) {
                 float constexpr big = 3.4e38f;
                 part.bounds_min = { big, big, big };
@@ -792,7 +794,7 @@ std::vector<pick_hit> step_model::pick(gpu::vec3 const &origin, gpu::vec3 const 
 
         step_part const &part = parts[part_index];
 
-        if(!ray_hits_box(origin, direction, part.bounds_min, part.bounds_max)) {
+        if(!part.visible || !ray_hits_box(origin, direction, part.bounds_min, part.bounds_max)) {
             continue;
         }
 
@@ -848,4 +850,33 @@ bool step_model::is_ancestor(int ancestor, int node) const
         node = nodes[node].parent;
     }
     return false;
+}
+
+//////////////////////////////////////////////////////////////////////
+
+void step_model::set_visible(int node, bool visible)
+{
+    if(node < 0 || node >= (int)nodes.size()) {
+        return;
+    }
+    nodes[node].visible = visible;
+
+    bool parent_visible = true;
+    for(int parent = nodes[node].parent; parent >= 0; parent = nodes[parent].parent) {
+        parent_visible = parent_visible && nodes[parent].visible;
+    }
+    update_visibility(node, parent_visible);
+}
+
+//////////////////////////////////////////////////////////////////////
+
+void step_model::update_visibility(int node, bool parent_visible)
+{
+    bool visible = parent_visible && nodes[node].visible;
+    if(nodes[node].part >= 0) {
+        parts[nodes[node].part].visible = visible;
+    }
+    for(int child : nodes[node].children) {
+        update_visibility(child, visible);
+    }
 }

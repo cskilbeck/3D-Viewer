@@ -646,9 +646,10 @@ void step_viewer::check_loaded()
 
 //////////////////////////////////////////////////////////////////////
 
-void step_viewer::model_tree_ui(int node_index)
+void step_viewer::model_tree_ui(int node_index, bool parent_visible)
 {
     step_node const &node = model->nodes[node_index];
+    bool visible = parent_visible && node.visible;
 
     ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick | ImGuiTreeNodeFlags_SpanAvailWidth;
     if(node.children.empty()) {
@@ -658,12 +659,22 @@ void step_viewer::model_tree_ui(int node_index)
         flags |= ImGuiTreeNodeFlags_Selected;
     }
 
-    // selected in the 3D view - open the way down to it
-    if(reveal_selection && !node.children.empty() && model->is_ancestor(node_index, selected_node) && node_index != selected_node) {
-        ImGui::SetNextItemOpen(true);
-    }
-
     ImGui::PushID(node_index);
+
+    // show/hide - things which are hidden (themselves or by an ancestor) are dimmed
+    if(!visible) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    }
+    ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(0, 0, 0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
+    if(ImGui::Button(node.visible ? MATSYM_visibility "##visible" : MATSYM_visibility_off "##visible")) {
+        model->set_visible(node_index, !node.visible);
+        set_active();
+    }
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+    ImGui::SetItemTooltip(node.visible ? "Hide" : "Show");
+    ImGui::SameLine();
 
     if(node.has_color) {
         ImGui::ColorButton("##color",
@@ -673,8 +684,18 @@ void step_viewer::model_tree_ui(int node_index)
         ImGui::SameLine();
     }
 
+    // selected in the 3D view - open the way down to it
+    // (right before the tree node, any item in between would use up SetNextItemOpen)
+    if(reveal_selection && !node.children.empty() && model->is_ancestor(node_index, selected_node) && node_index != selected_node) {
+        ImGui::SetNextItemOpen(true);
+    }
+
     char const *icon = node.is_assembly ? MATSYM_folder : MATSYM_deployed_code;
     bool open = ImGui::TreeNodeEx("##node", flags, "%s %s", icon, node.name.c_str());
+
+    if(!visible) {
+        ImGui::PopStyleColor();
+    }
 
     if(ImGui::IsItemClicked(ImGuiMouseButton_Left) && !ImGui::IsItemToggledOpen()) {
         select_node(node_index, false);
@@ -686,7 +707,7 @@ void step_viewer::model_tree_ui(int node_index)
 
     if(open && !node.children.empty()) {
         for(int child : node.children) {
-            model_tree_ui(child);
+            model_tree_ui(child, visible);
         }
         ImGui::TreePop();
     }
@@ -834,7 +855,7 @@ void step_viewer::ui()
             ImGui::TextDisabled("No model loaded");
         } else {
             for(int root : model->roots) {
-                model_tree_ui(root);
+                model_tree_ui(root, true);
             }
             reveal_selection = false;
         }
