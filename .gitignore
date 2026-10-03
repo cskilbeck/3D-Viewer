@@ -1,0 +1,13 @@
+cmake-build*/
+.cmake/
+.idea/
+imgui.ini
+.venv/
+out/build/
+.vs/
+.claude/
+vc*.pdb
+CMakeSettings.json
+.DS_Store
+out/
+build*/

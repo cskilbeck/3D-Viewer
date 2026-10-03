@@ -1,0 +1,87 @@
+//////////////////////////////////////////////////////////////////////
+
+#include <chrono>
+#include <cstdlib>
+#include <string>
+
+#include "log.h"
+
+//////////////////////////////////////////////////////////////////////
+
+namespace
+{
+    using namespace std::chrono;
+
+    time_point log_startup_timestamp{ system_clock::now() };
+
+    [[maybe_unused]] constexpr char const *black = "\x1b[30m";
+    [[maybe_unused]] constexpr char const *red = "\x1b[31m";
+    [[maybe_unused]] constexpr char const *green = "\x1b[32m";
+    [[maybe_unused]] constexpr char const *yellow = "\x1b[33m";
+    [[maybe_unused]] constexpr char const *blue = "\x1b[34m";
+    [[maybe_unused]] constexpr char const *magenta = "\x1b[35m";
+    [[maybe_unused]] constexpr char const *cyan = "\x1b[36m";
+    [[maybe_unused]] constexpr char const *white = "\x1b[37m";
+    [[maybe_unused]] constexpr char const *default_color = "\x1b[39m";
+
+#if defined(LOG_USE_OUTPUT_DEBUG_STRING)
+    constexpr char const *reset_color = "";
+#else
+    constexpr char const *reset_color = "\x1b[0m";
+#endif
+
+    constexpr char const *log_level_colors[] = { green, cyan, yellow, magenta, red, red };
+    constexpr char const *log_level_names[] = { "D", "V", "I", "W", "E", "F" };
+
+    //////////////////////////////////////////////////////////////////////
+
+    constexpr char const *log_color(logging::log_level_t level)
+    {
+#if defined(LOG_USE_OUTPUT_DEBUG_STRING)
+        return "";
+#else
+        int l = level;
+        return log_level_colors[l];
+#endif
+    }
+
+    //////////////////////////////////////////////////////////////////////
+
+    constexpr char const *log_name(logging::log_level_t level)
+    {
+        int l = level;
+        return log_level_names[l];
+    }
+
+}    // namespace
+
+//////////////////////////////////////////////////////////////////////
+
+namespace logging
+{
+    log_emitter_function_t log_emitter_function{ nullptr };
+
+    log_level_t log_level{ log_level_error };
+
+    //////////////////////////////////////////////////////////////////////
+
+    void emit(log_level_t level, char const *context, char const *fmt, std::format_args const &fmt_args)
+    {
+        time_point<system_clock> now = system_clock::now();
+        auto nanos = duration_cast<nanoseconds>(now - log_startup_timestamp).count();
+        auto micros = nanos / 1000;
+        auto micro10 = (nanos / 100) % 10;
+        char const *level_name = log_name(level);
+        char const *level_color = log_color(level);
+        std::string message = std::vformat(fmt, fmt_args);
+        std::string log_message = std::format("{:010d}.{} {}{} {:<12.12s} {}{}", micros, micro10, level_color, level_name, context, reset_color, message);
+        if(log_emitter_function != nullptr) {
+            log_emitter_function(log_message.c_str());
+        }
+
+        if(level == log_level_fatal) {
+            exit(1);
+        }
+    }
+
+}    // namespace logging
