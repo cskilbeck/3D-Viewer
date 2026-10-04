@@ -120,6 +120,12 @@ struct step_model
     // show/hide a node (and so everything under it)
     void set_visible(int node, bool visible);
 
+    // hide everything except a node (and what's under it)
+    void isolate(int node);
+
+    // make everything visible
+    void show_all();
+
     // all the parts in (and under) a node
     void get_parts(int node, std::vector<int> &parts_out) const;
 

@@ -1,5 +1,6 @@
 //////////////////////////////////////////////////////////////////////
-// Draws a step_model with SDL_GPU: shaded triangles + edges
+// Draws a step_model with SDL_GPU: shaded triangles + edges, plus a grid and axes
+// Depth is reversed (near = 1, far = 0) for precision
 
 #pragma once
 
@@ -44,6 +45,15 @@ struct model_renderer
         float selection_tint[4];                // rgb + strength
         std::vector<step_part> const *parts;    // so selected parts can be found
         std::vector<int> const *selected_parts;
+
+        // grid on the XY plane
+        bool show_grid;
+        float grid_plane[4];    // xy = middle of the square it's drawn on, z = height of the plane, w = half size of the square
+        float grid_color[4];
+        float grid_lines[4];    // x = spacing, yz = offset so lines land on multiples of spacing in file coordinates
+        float grid_fade[4];     // xy = middle, z = radius where it's faded out
+
+        bool show_axes;
     };
 
     // clear the whole target to background and draw the model into the viewport
@@ -59,6 +69,9 @@ struct model_renderer
     SDL_GPUGraphicsPipeline *transparent_back_pipeline{};     // back faces of transparent parts
     SDL_GPUGraphicsPipeline *transparent_front_pipeline{};    // then their front faces
     SDL_GPUGraphicsPipeline *edge_pipeline{};
+    SDL_GPUGraphicsPipeline *grid_pipeline{};
+
+    SDL_GPUBuffer *grid_buffer{};    // a -1..1 square
 
     // render targets, recreated when the size changes
     SDL_GPUTexture *msaa_texture{};
@@ -70,6 +83,7 @@ struct model_renderer
     SDL_GPUBuffer *vertex_buffer{};
     SDL_GPUBuffer *index_buffer{};
     SDL_GPUBuffer *edge_buffer{};
+    SDL_GPUBuffer *axes_buffer{};    // X, Y, Z lines through the origin of the file
     uint32_t num_indices{};
     uint32_t num_opaque_indices{};
     uint32_t num_edge_vertices{};

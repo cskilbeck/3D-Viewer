@@ -54,7 +54,7 @@ void step_viewer::set_active()
 
 bool step_viewer::is_idle()
 {
-    if(cam.is_animating() || pending_zoom.length() != 0) {
+    if(cam.is_animating() || pending_zoom != 0) {
         return false;
     }
     // poll events for this much time after last call to set_active()
@@ -184,25 +184,52 @@ float step_viewer::zoom_click_distance(gpu::vec3 const &eye) const
 }
 
 //////////////////////////////////////////////////////////////////////
+
+gpu::vec3 step_viewer::view_plane_point(float x, float y) const
+{
+    gpu::vec3 origin;
+    gpu::vec3 direction;
+    float ndc_x = viewport_width > 0 ? (x - viewport_xpos) / viewport_width * 2.0f - 1.0f : 0.0f;
+    float ndc_y = viewport_height > 0 ? 1.0f - (y - viewport_ypos) / viewport_height * 2.0f : 0.0f;
+    cam.ray(ndc_x, ndc_y, viewport_aspect(), origin, direction);
+    gpu::vec3 forward = cam.basis().forward;
+    float along = gpu::dot(direction, forward);
+    return along > 1e-6f ? origin + direction * (gpu::dot(cam.target - origin, forward) / along) : cam.target;
+}
+
+//////////////////////////////////////////////////////////////////////
+// Perspective moves the camera along the ray through the mouse, orthographic
+// can't (moving doesn't change anything) so it scales the view around the mouse
+
+void step_viewer::apply_zoom(float clicks, float x, float y)
+{
+    if(cam.orthographic) {
+        cam.scale_view(clicks, view_plane_point(x, y), (float)viewport_height);
+    } else {
+        cam.move(mouse_ray(x, y) * (clicks * zoom_click_distance(cam.eye())), (float)viewport_height);
+    }
+}
+
+//////////////////////////////////////////////////////////////////////
 // Use up some of the pending zoom each frame (exponential ease out)
 
 void step_viewer::update_zoom(double now)
 {
-    if(pending_zoom.length() == 0) {
+    if(pending_zoom == 0) {
         return;
     }
     float dt = (float)(now - pending_zoom_time);
     pending_zoom_time = now;
 
     float time_constant = std::max(settings.zoom_smooth_time, 0.001f) / 3.0f;    // ~95% done after zoom_smooth_time
-    gpu::vec3 step = pending_zoom * (1.0f - std::exp(-dt / time_constant));
-    if((pending_zoom - step).length() < cam.scene_radius * 1e-5f) {
-        step = pending_zoom;
+    float clicks = pending_zoom * (1.0f - std::exp(-dt / time_constant));
+    if(std::abs(pending_zoom - clicks) < 1e-3f) {
+        clicks = pending_zoom;
     }
-    cam.move(step, (float)viewport_height);
-    pending_zoom = pending_zoom - step;
-    if(pending_zoom.length() < cam.scene_radius * 1e-5f) {
-        pending_zoom = {};
+    apply_zoom(clicks, pending_zoom_x, pending_zoom_y);
+    pending_zoom -= clicks;
+    if(std::abs(pending_zoom) < 1e-3f) {
+        pending_zoom = 0;
     }
 }
 
@@ -281,6 +308,23 @@ void step_viewer::pick(float x, float y)
 
 //////////////////////////////////////////////////////////////////////
 
+void step_viewer::toggle_isolate()
+{
+    if(model == nullptr) {
+        return;
+    }
+    if(isolated) {
+        model->show_all();
+        isolated = false;
+    } else if(selected_node >= 0) {
+        model->isolate(selected_node);
+        isolated = true;
+    }
+    set_active();
+}
+
+//////////////////////////////////////////////////////////////////////
+
 void step_viewer::select_node(int node, bool reveal)
 {
     selected_node = node;
@@ -336,8 +380,7 @@ void step_viewer::on_mouse_move(double xpos, double ypos)
     case drag_mode::zoom: {
         // right/up zooms in, left/down zooms out, about one wheel click per 50 pixels
         float constexpr pixels_per_click = 50.0f;
-        float clicks = (dx - dy) / pixels_per_click;
-        cam.move(mouse_ray(zoom_x, zoom_y) * (clicks * zoom_click_distance(cam.eye())), (float)viewport_height);
+        apply_zoom((dx - dy) / pixels_per_click, zoom_x, zoom_y);
     } break;
     case drag_mode::none:
         break;
@@ -351,15 +394,15 @@ void step_viewer::on_scroll(double xoffset, double yoffset)
     set_active();
     if(model != nullptr && mouse_in_viewport()) {
         cam.stop_animation();
-        // along the ray through the mouse so whatever's under it stays under it
-        gpu::vec3 delta = mouse_ray(mouse_x, mouse_y) * ((float)yoffset * zoom_click_distance(cam.eye() + pending_zoom));
         if(settings.zoom_smooth_time <= 0) {
-            cam.move(delta, (float)viewport_height);
+            apply_zoom((float)yoffset, mouse_x, mouse_y);
         } else {
-            if(pending_zoom.length() == 0) {
+            if(pending_zoom == 0) {
                 pending_zoom_time = get_time();
             }
-            pending_zoom = pending_zoom + delta;
+            pending_zoom += (float)yoffset;
+            pending_zoom_x = mouse_x;
+            pending_zoom_y = mouse_y;
         }
     }
 }
@@ -438,30 +481,61 @@ void step_viewer::on_key(int key, int scancode, int action, int mods)
 {
     set_active();
 
-    if(action != ACTION_PRESS) {
+    // shortcuts are done in handle_shortcuts(), keys don't get here when an ImGui window has focus
+}
+
+//////////////////////////////////////////////////////////////////////
+// Keyboard shortcuts work whatever has focus, except while typing into something
+
+void step_viewer::handle_shortcuts()
+{
+    ImGuiIO &io = ImGui::GetIO();
+    if(io.WantTextInput || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) {
         return;
     }
-
-    switch(key) {
-
-    case KEY_ESCAPE:
+    if(ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
         set_should_close();
-        break;
-
-    case KEY_O:
-        if((mods & KMOD_CTRL_FLAG) != 0) {
-            file_open();
-        }
-        break;
-
-    case KEY_F:
-        fit_to_view();
-        break;
-
-    case KEY_E:
-        settings.show_edges = !settings.show_edges;
-        break;
     }
+    if(ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_O)) {
+        file_open();
+    }
+    if(!io.KeyCtrl && !io.KeyAlt && !io.KeySuper && !io.KeyShift) {
+        if(ImGui::IsKeyPressed(ImGuiKey_F, false)) {
+            fit_to_view();
+        }
+        if(ImGui::IsKeyPressed(ImGuiKey_E, false)) {
+            settings.show_edges = !settings.show_edges;
+        }
+        if(ImGui::IsKeyPressed(ImGuiKey_I, false)) {
+            toggle_isolate();
+        }
+        if(ImGui::IsKeyPressed(ImGuiKey_Space, false)) {
+            reset_view();
+        }
+        if(ImGui::IsKeyPressed(ImGuiKey_G, false)) {
+            settings.show_grid = !settings.show_grid;
+        }
+        if(ImGui::IsKeyPressed(ImGuiKey_X, false)) {
+            settings.show_axes = !settings.show_axes;
+        }
+    }
+}
+
+//////////////////////////////////////////////////////////////////////
+// most recent first, no duplicates, saved straight away
+
+void step_viewer::add_recent_file(std::filesystem::path const &path)
+{
+    size_t constexpr max_recent_files = 10;
+    std::u8string utf8 = path.u8string();
+    std::string name(utf8.begin(), utf8.end());
+    auto &recent = settings.recent_files;
+    recent.erase(std::remove(recent.begin(), recent.end(), name), recent.end());
+    recent.insert(recent.begin(), name);
+    if(recent.size() > max_recent_files) {
+        recent.resize(max_recent_files);
+    }
+    save_settings(settings_path());
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -473,7 +547,7 @@ void step_viewer::on_closed()
         loader.join();
     }
     model.reset();
-    save_settings(config_path(app_name, settings_filename));
+    save_settings(settings_path());
     NFD_Quit();
     gpu_window::on_closed();
     renderer.cleanup();
@@ -570,7 +644,13 @@ bool step_viewer::on_init()
         return false;
     }
 
-    load_settings(config_path(app_name, settings_filename));
+    // settings used to be in the config directory, pick them up from there if there's nothing new yet
+    std::filesystem::path path = settings_path();
+    std::error_code error;
+    if(!std::filesystem::exists(path, error)) {
+        path = config_path(app_name, "settings.json");
+    }
+    load_settings(path);
 
     return true;
 }
@@ -633,11 +713,13 @@ void step_viewer::check_loaded()
     set_active();
     if(loaded_model) {
         model = std::move(loaded_model);
+        isolated = false;
         select_node(-1, false);
         renderer.set_model(*model);
         cam.scene_radius = (float)model->radius;
         reset_view();
         model->edges = {};    // vertices/indices are kept for picking
+        add_recent_file(model->path);
     } else if(load_error != "Cancelled") {
         LOG_ERROR("{}", load_error);
         ImGui::OpenPopup("Load failed");
@@ -749,6 +831,173 @@ std::expected<std::filesystem::path, std::error_code> step_viewer::load_file_dia
 
 //////////////////////////////////////////////////////////////////////
 
+void step_viewer::open_settings()
+{
+    settings_snapshot = settings;
+    settings_open = true;
+    ImGui::SetWindowFocus("Settings");
+}
+
+//////////////////////////////////////////////////////////////////////
+
+void step_viewer::revert_settings()
+{
+    settings_t current = settings;
+    settings = settings_snapshot;
+    settings.copy_non_dialog_state(current);
+}
+
+//////////////////////////////////////////////////////////////////////
+
+void step_viewer::default_settings()
+{
+    settings_t defaults;
+    defaults.copy_non_dialog_state(settings);
+    settings = defaults;
+}
+
+//////////////////////////////////////////////////////////////////////
+// Changes take effect immediately (everything reads the settings every frame),
+// so there's no Apply, just Revert (to how they were when the dialog opened),
+// Defaults and Close. Settings are saved when it closes.
+
+void step_viewer::settings_ui()
+{
+    if(!settings_open) {
+        return;
+    }
+
+    bool still_open = true;
+
+    // first time, in the middle of the 3D view (after that imgui.ini remembers where it was)
+    ImGuiViewport const *main_viewport = ImGui::GetMainViewport();
+    ImVec2 view_center(main_viewport->Pos.x + viewport_xpos + viewport_width * 0.5f, main_viewport->Pos.y + viewport_ypos + viewport_height * 0.5f);
+    ImGui::SetNextWindowPos(view_center, ImGuiCond_FirstUseEver, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(ImGui::GetFontSize() * 26, 0), ImVec2(FLT_MAX, FLT_MAX));
+    if(ImGui::Begin("Settings", &still_open, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoCollapse)) {
+
+        float const slider_width = ImGui::GetFontSize() * 12;
+        ImGui::PushItemWidth(slider_width);
+
+        ImGui::SeparatorText("Appearance");
+        ImGui::ColorEdit3("Background", (float *)settings.background_color, ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_NoInputs);
+        ImGui::Checkbox("Edges", &settings.show_edges);
+        ImGui::Checkbox("Toolbar", &settings.view_toolbar);
+        ImGui::Checkbox("Tree", &settings.view_tree);
+        ImGui::Checkbox("Info", &settings.view_info);
+
+        ImGui::SeparatorText("View");
+        int projection = settings.orthographic ? 1 : 0;
+        if(ImGui::Combo("Projection", &projection, "Perspective\0Orthographic\0")) {
+            settings.orthographic = projection == 1;
+        }
+        int rotation = settings.trackball ? 1 : 0;
+        if(ImGui::Combo("Rotation", &rotation, "Turntable (Z up)\0Trackball (free)\0")) {
+            settings.trackball = rotation == 1;
+        }
+        ImGui::SetItemTooltip("Turntable keeps Z pointing up, trackball rotates freely in any direction");
+        ImGui::Checkbox("Axes", &settings.show_axes);
+        ImGui::SetItemTooltip("X, Y and Z axes through the origin (red, green, blue)");
+
+        ImGui::SeparatorText("Grid");
+        ImGui::Checkbox("Show grid", &settings.show_grid);
+        ImGui::SetItemTooltip("Grid on the XY plane");
+        ImGui::SliderFloat("Spacing", &settings.grid_spacing, 0.01f, 1000.0f, "%.3g", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp);
+        ImGui::SetItemTooltip("Distance between grid lines (every 10th line is stronger)");
+        ImGui::ColorEdit4("Grid color", (float *)settings.grid_color, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
+
+        ImGui::SeparatorText("Selection");
+        ImGui::ColorEdit3("Tint color", (float *)settings.selection_color, ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_NoInputs);
+        ImGui::SliderFloat("Tint strength", &settings.selection_color.a, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::SetItemTooltip("How much of the tint color is mixed into selected parts");
+
+        ImGui::SeparatorText("Fit");
+        float border_percent = settings.fit_border * 100.0f;
+        if(ImGui::SliderFloat("Border", &border_percent, 0.0f, 30.0f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp)) {
+            settings.fit_border = border_percent / 100.0f;
+        }
+        ImGui::SetItemTooltip("Space left around the model (or selection) on each side");
+        ImGui::SliderFloat("Animation", &settings.fit_duration, 0.0f, 2.0f, "%.2f s", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::SetItemTooltip("How long Fit takes to get there (0 = instant)");
+
+        ImGui::SeparatorText("Zoom");
+        float step_percent = settings.zoom_step * 100.0f;
+        if(ImGui::SliderFloat("Step", &step_percent, 2.0f, 50.0f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp)) {
+            settings.zoom_step = step_percent / 100.0f;
+        }
+        ImGui::SetItemTooltip("How far each wheel click moves, as a fraction of the distance to the model");
+        float floor_percent = settings.zoom_floor * 100.0f;
+        if(ImGui::SliderFloat("Close up speed", &floor_percent, 2.0f, 100.0f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp)) {
+            settings.zoom_floor = floor_percent / 100.0f;
+        }
+        ImGui::SetItemTooltip("Close to (or inside) the model, zoom speed is based on this fraction\nof the size of the selection (or the model if nothing's selected)");
+        ImGui::SliderFloat("Smoothing", &settings.zoom_smooth_time, 0.0f, 0.5f, "%.2f s", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::SetItemTooltip("How long each wheel click glides for (0 = instant)");
+
+        ImGui::PopItemWidth();
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        RightAlignButtons({ "Revert", "Defaults", "Close" });
+
+        ImGui::BeginDisabled(settings.same_dialog_settings(settings_snapshot));
+        if(ImGui::Button("Revert")) {
+            revert_settings();
+        }
+        ImGui::EndDisabled();
+        ImGui::SetItemTooltip("Go back to the settings from when this was opened");
+        ImGui::SameLine();
+
+        if(ImGui::Button("Defaults")) {
+            default_settings();
+        }
+        ImGui::SameLine();
+
+        if(ImGui::Button("Close")) {
+            still_open = false;
+        }
+    }
+    ImGui::End();
+
+    // closed with the button or the window's X
+    if(!still_open) {
+        settings_open = false;
+        save_settings(settings_path());
+    }
+}
+
+//////////////////////////////////////////////////////////////////////
+
+std::string step_viewer::loading_text() const
+{
+    std::u8string name = loading_path.filename().u8string();
+    return "Loading " + std::string(name.begin(), name.end());
+}
+
+//////////////////////////////////////////////////////////////////////
+// in the middle of the 3D view, only when there's nowhere else to show it
+
+void step_viewer::loading_window_ui()
+{
+    if(!loading || settings.view_info || settings.view_toolbar) {
+        return;
+    }
+    ImGuiViewport const *main_viewport = ImGui::GetMainViewport();
+    ImVec2 view_center(main_viewport->Pos.x + viewport_xpos + viewport_width * 0.5f, main_viewport->Pos.y + viewport_ypos + viewport_height * 0.5f);
+    ImGui::SetNextWindowPos(view_center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings |
+                             ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove;
+    if(ImGui::Begin("Loading", nullptr, flags)) {
+        ImGui::TextUnformatted(loading_text().c_str());
+        ImGui::ProgressBar(load_progress, ImVec2(ImGui::GetFontSize() * 16, 0));
+    }
+    ImGui::End();
+}
+
+//////////////////////////////////////////////////////////////////////
+
 void step_viewer::ui()
 {
     auto is_active = [] {
@@ -777,8 +1026,32 @@ void step_viewer::ui()
             if(ImGui::MenuItem("Open", "Ctrl-O", nullptr)) {
                 file_open();
             }
+            if(ImGui::BeginMenu("Open Recent", !settings.recent_files.empty())) {
+                std::string to_open;
+                for(size_t i = 0; i < settings.recent_files.size(); ++i) {
+                    std::string const &name = settings.recent_files[i];
+                    std::filesystem::path path(std::u8string(name.begin(), name.end()));
+                    std::u8string filename = path.filename().u8string();
+                    ImGui::PushID((int)i);
+                    if(ImGui::MenuItem(std::string(filename.begin(), filename.end()).c_str())) {
+                        to_open = name;
+                    }
+                    ImGui::SetItemTooltip("%s", name.c_str());
+                    ImGui::PopID();
+                }
+                ImGui::Separator();
+                if(ImGui::MenuItem("Clear Recent")) {
+                    settings.recent_files.clear();
+                    save_settings(settings_path());
+                }
+                ImGui::EndMenu();
+                if(!to_open.empty()) {
+                    open_file(std::filesystem::path(std::u8string(to_open.begin(), to_open.end())));
+                }
+            }
             if(ImGui::MenuItem("Close", nullptr, nullptr, model != nullptr)) {
                 select_node(-1, false);
+                isolated = false;
                 model.reset();
                 renderer.clear_model();
             }
@@ -792,12 +1065,22 @@ void step_viewer::ui()
             if(ImGui::MenuItem("Fit to window", "F", nullptr, model != nullptr)) {
                 fit_to_view();
             }
-            if(ImGui::MenuItem("Reset view", nullptr, nullptr, model != nullptr)) {
+            if(ImGui::MenuItem("Reset view", "Space", nullptr, model != nullptr)) {
                 reset_view();
             }
+            if(ImGui::MenuItem(isolated ? "Unisolate" : "Isolate", "I", nullptr, model != nullptr && (isolated || selected_node >= 0))) {
+                toggle_isolate();
+            }
             ImGui::MenuItem("Edges", "E", &settings.show_edges);
+            ImGui::MenuItem("Grid", "G", &settings.show_grid);
+            ImGui::MenuItem("Axes", "X", &settings.show_axes);
             ImGui::Separator();
             ImGui::MenuItem("Toolbar", "", &settings.view_toolbar);
+            ImGui::MenuItem("Tree", "", &settings.view_tree);
+            ImGui::MenuItem("Info", "", &settings.view_info);
+            if(ImGui::MenuItem("Settings...", nullptr, nullptr)) {
+                open_settings();
+            }
 
             // Background color
             ImVec2 pos = ImGui::GetCursorScreenPos();
@@ -830,7 +1113,10 @@ void step_viewer::ui()
     ImGui::PopStyleVar(1);
 
     if(settings.view_toolbar) {
-        ImGui::Begin("Toolbar", nullptr, ImGuiWindowFlags_NoDecoration);
+        // a bar across the top of the window under the menu (like the menu bar), not a dockable window
+        float toolbar_height = ImGui::GetFrameHeight() + ImGui::GetStyle().WindowPadding.y * 2.0f;
+        ImGuiWindowFlags toolbar_flags = ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoSavedSettings;
+        ImGui::BeginViewportSideBar("##Toolbar", ImGui::GetMainViewport(), ImGuiDir_Up, toolbar_height, toolbar_flags);
         {
             if(ImGui::Button("Open " MATSYM_file_open)) {
                 file_open();
@@ -843,71 +1129,110 @@ void step_viewer::ui()
             ImGui::SetItemTooltip("Fit the selection (or everything) in the view (F)");
             ImGui::EndDisabled();
             ImGui::SameLine();
+            ImGui::BeginDisabled(model == nullptr || (!isolated && selected_node < 0));
+            bool isolate_checked = isolated;
+            if(ImGui::Checkbox("Isolate", &isolate_checked)) {
+                toggle_isolate();
+            }
+            ImGui::SetItemTooltip("Show only the selection (I)");
+            ImGui::EndDisabled();
+            ImGui::SameLine();
             ImGui::Checkbox("Edges", &settings.show_edges);
             ImGui::SetItemTooltip("Show edges (E)");
+            ImGui::SameLine();
+            ImGui::Checkbox("Grid", &settings.show_grid);
+            ImGui::SetItemTooltip("Show a grid on the XY plane (G)");
+            ImGui::SameLine();
+            ImGui::Checkbox("Axes", &settings.show_axes);
+            ImGui::SetItemTooltip("Show the X, Y and Z axes (X)");
+
+            if(loading && !settings.view_info) {
+                std::string text = loading_text();
+                float const bar_width = ImGui::GetFontSize() * 10;
+                float spacing = ImGui::GetStyle().ItemSpacing.x;
+                float width = ImGui::CalcTextSize(text.c_str()).x + spacing + bar_width;
+                ImGui::SameLine();
+                float available = ImGui::GetContentRegionAvail().x;
+                if(available > width) {
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + available - width);
+                }
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted(text.c_str());
+                ImGui::SameLine();
+                ImGui::ProgressBar(load_progress, ImVec2(bar_width, 0));
+            }
         }
         ImGui::End();
     }
 
-    ImGui::Begin("Model");
-    {
-        if(model == nullptr) {
-            ImGui::TextDisabled("No model loaded");
-        } else {
-            for(int root : model->roots) {
-                model_tree_ui(root, true);
-            }
-            reveal_selection = false;
-        }
-    }
-    ImGui::End();
+    // its own window (3) when there's no Info window or toolbar
+    loading_window_ui();
 
-    ImGui::Begin("Info");
-    {
-        if(loading) {
-            ImGui::TextWrapped("Loading %s", loading_path.filename().string().c_str());
-            ImGui::ProgressBar(load_progress);
-            ImGui::Separator();
-        }
-        if(model == nullptr) {
-            if(!loading) {
-                ImGui::Text("Open a model...");
-            }
-        } else {
-            ImGui::TextWrapped("%s", model->path.string().c_str());
-            ImGui::Separator();
-            if(ImGui::BeginTable("##model_info", 2, ImGuiTableFlags_SizingStretchProp)) {
-                auto row = [](char const *label, std::string const &value) {
-                    ImGui::TableNextRow();
-                    ImGui::TableNextColumn();
-                    ImGui::TextUnformatted(label);
-                    ImGui::TableNextColumn();
-                    ImGui::TextUnformatted(value.c_str());
-                };
-                row("Solids", std::format("{}", model->num_solids));
-                row("Faces", std::format("{}", model->num_faces));
-                row("Triangles", std::format("{}", model->num_triangles));
-                row("Size",
-                    std::format("{:.3f} x {:.3f} x {:.3f}",
-                                model->extent_max[0] - model->extent_min[0],
-                                model->extent_max[1] - model->extent_min[1],
-                                model->extent_max[2] - model->extent_min[2]));
-                row("Read time", std::format("{:.2f}s", model->read_time));
-                row("Mesh time", std::format("{:.2f}s", model->mesh_time));
-                ImGui::EndTable();
-            }
-            if(selected_node >= 0) {
-                ImGui::Separator();
-                uint32_t triangles = 0;
-                for(int part : selected_parts) {
-                    triangles += (model->parts[part].num_indices + model->parts[part].num_transparent_indices) / 3;
+    // the tree (it's called "Model" so the saved layout still knows where it goes)
+    if(settings.view_tree) {
+        if(ImGui::Begin("Model", &settings.view_tree)) {
+            if(model == nullptr) {
+                ImGui::TextDisabled("No model loaded");
+            } else {
+                for(int root : model->roots) {
+                    model_tree_ui(root, true);
                 }
-                ImGui::TextWrapped("Selected: %s", model->nodes[selected_node].name.c_str());
-                ImGui::Text("%zu part(s), %u triangles", selected_parts.size(), triangles);
             }
         }
+        ImGui::End();
     }
-    ImGui::End();
+    reveal_selection = false;
+
+    if(settings.view_info) {
+        if(ImGui::Begin("Info", &settings.view_info)) {
+            if(loading) {
+                ImGui::TextWrapped("%s", loading_text().c_str());
+                ImGui::ProgressBar(load_progress);
+                ImGui::Separator();
+            }
+            if(model == nullptr) {
+                if(!loading) {
+                    ImGui::Text("Open a model...");
+                }
+            } else {
+                std::u8string filename = model->path.filename().u8string();
+                ImGui::TextWrapped("%s", std::string(filename.begin(), filename.end()).c_str());
+                std::u8string full_path = model->path.u8string();
+                ImGui::SetItemTooltip("%s", std::string(full_path.begin(), full_path.end()).c_str());
+                ImGui::Separator();
+                if(ImGui::BeginTable("##model_info", 2, ImGuiTableFlags_SizingStretchProp)) {
+                    auto row = [](char const *label, std::string const &value) {
+                        ImGui::TableNextRow();
+                        ImGui::TableNextColumn();
+                        ImGui::TextUnformatted(label);
+                        ImGui::TableNextColumn();
+                        ImGui::TextUnformatted(value.c_str());
+                    };
+                    row("Solids", std::format("{}", model->num_solids));
+                    row("Faces", std::format("{}", model->num_faces));
+                    row("Triangles", std::format("{}", model->num_triangles));
+                    row("Size",
+                        std::format("{:.3f} x {:.3f} x {:.3f}",
+                                    model->extent_max[0] - model->extent_min[0],
+                                    model->extent_max[1] - model->extent_min[1],
+                                    model->extent_max[2] - model->extent_min[2]));
+                    ImGui::EndTable();
+                }
+                if(selected_node >= 0) {
+                    ImGui::Separator();
+                    uint32_t triangles = 0;
+                    for(int part : selected_parts) {
+                        triangles += (model->parts[part].num_indices + model->parts[part].num_transparent_indices) / 3;
+                    }
+                    ImGui::TextWrapped("Selected: %s", model->nodes[selected_node].name.c_str());
+                    ImGui::Text("%zu part(s), %u triangles", selected_parts.size(), triangles);
+                }
+            }
+        }
+        ImGui::End();
+    }
+
+    settings_ui();
 
     if(ImGui::BeginPopupModal("Load failed", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::TextUnformatted(load_error.c_str());
@@ -927,6 +1252,16 @@ void step_viewer::on_render()
 {
     check_loaded();
 
+    handle_shortcuts();
+
+    cam.orthographic = settings.orthographic;
+    if(cam.trackball != settings.trackball) {
+        cam.trackball = settings.trackball;
+        if(!cam.trackball) {
+            cam.level();    // turntable keeps Z up
+        }
+    }
+
     cam.update(get_time());
     update_zoom(get_time());
 
@@ -937,22 +1272,16 @@ void step_viewer::on_render()
 
         ImGui::DockBuilderRemoveNodeChildNodes(dockspace_id);
 
-        // Top toolbar (full width)
-        ImGuiID dock_top_id;
-        ImGuiID dock_rest_id;
-        ImGui::DockBuilderSplitNode(dockspace_id, ImGuiDir_Up, 0.045f, &dock_top_id, &dock_rest_id);
-
         // Right info panel (25% width)
         ImGuiID dock_right_id;
         ImGuiID dock_middle_id;
-        ImGui::DockBuilderSplitNode(dock_rest_id, ImGuiDir_Right, 0.25f, &dock_right_id, &dock_middle_id);
+        ImGui::DockBuilderSplitNode(dockspace_id, ImGuiDir_Right, 0.25f, &dock_right_id, &dock_middle_id);
 
         // Left model panel
         ImGuiID dock_left_id;
         ImGuiID dock_center_id;
         ImGui::DockBuilderSplitNode(dock_middle_id, ImGuiDir_Left, 0.25f, &dock_left_id, &dock_center_id);
 
-        ImGui::DockBuilderDockWindow("Toolbar", dock_top_id);
         ImGui::DockBuilderDockWindow("Info", dock_right_id);
         ImGui::DockBuilderDockWindow("Model", dock_left_id);
 
@@ -963,7 +1292,6 @@ void step_viewer::on_render()
                 n->SetLocalFlags(n->LocalFlags | ImGuiDockNodeFlags_AutoHideTabBar);
             }
         };
-        hide_tab_bar(dock_top_id);
         hide_tab_bar(dock_right_id);
         hide_tab_bar(dock_left_id);
 
@@ -1031,6 +1359,10 @@ void step_viewer::gpu_render()
     auto const &bg = settings.background_color;
     float background[3] = { bg.r, bg.g, bg.b };
 
+    // the grid fades out at this distance from the camera target, orthographic needs the far plane beyond it
+    float grid_radius = std::max(cam.scene_radius * 10.0f, cam.distance * 25.0f);
+    cam.far_extent = ((settings.show_grid || settings.show_axes) && model != nullptr) ? grid_radius * 2.0f : 0.0f;
+
     model_renderer::draw_params params{};
     params.viewport = vp;
     std::copy(background, background + 3, params.background);
@@ -1041,6 +1373,26 @@ void step_viewer::gpu_render()
     std::copy((float const *)settings.selection_color, (float const *)settings.selection_color + 4, params.selection_tint);
     params.parts = model != nullptr ? &model->parts : nullptr;
     params.selected_parts = &selected_parts;
+
+    // grid on the file's XY plane (vertices are relative to the model center), a big square
+    // under the camera target which fades out well before its edges
+    params.show_grid = settings.show_grid && model != nullptr;
+    params.show_axes = settings.show_axes && model != nullptr;
+    if(params.show_grid) {
+        double spacing = std::max((double)settings.grid_spacing, 1e-6);
+        float plane_z = (float)-model->center[2];
+        float grid_params[4][4] = {
+            { cam.target.x, cam.target.y, plane_z, grid_radius },
+            { settings.grid_color.r, settings.grid_color.g, settings.grid_color.b, settings.grid_color.a },
+            // offset so the lines land on multiples of the spacing in file coordinates (mod 10 so it stays small)
+            { (float)spacing, (float)std::fmod(model->center[0], spacing * 10), (float)std::fmod(model->center[1], spacing * 10), 0 },
+            { cam.target.x, cam.target.y, grid_radius, 0 },
+        };
+        std::copy(grid_params[0], grid_params[0] + 4, params.grid_plane);
+        std::copy(grid_params[1], grid_params[1] + 4, params.grid_color);
+        std::copy(grid_params[2], grid_params[2] + 4, params.grid_lines);
+        std::copy(grid_params[3], grid_params[3] + 4, params.grid_fade);
+    }
 
     renderer.render(gpu_cmd, gpu_swapchain_texture, sw_w, sw_h, params);
 }

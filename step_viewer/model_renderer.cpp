@@ -25,6 +25,27 @@ namespace
 
     float const edge_color[4] = { 0.08f, 0.08f, 0.08f, 1.0f };
 
+    float const axis_colors[3][4] = { { 0.9f, 0.2f, 0.2f, 1.0f }, { 0.2f, 0.8f, 0.2f, 1.0f }, { 0.25f, 0.45f, 1.0f, 1.0f } };
+
+    struct grid_vertex_uniforms
+    {
+        gpu::mat4 view;
+        gpu::mat4 projection;
+        float plane[4];
+    };
+
+    struct grid_fragment_uniforms
+    {
+        float color[4];
+        float lines[4];
+        float fade[4];
+    };
+
+    struct grid_vertex
+    {
+        float corner[2];
+    };
+
     //////////////////////////////////////////////////////////////////////
 
     SDL_GPUSampleCount best_sample_count(SDL_GPUDevice *gpu, SDL_GPUTextureFormat color_format, SDL_GPUTextureFormat depth_format)
@@ -86,8 +107,10 @@ bool model_renderer::init(gpu::device &device, SDL_GPUTextureFormat swapchain_fo
     SDL_GPUShader *mesh_frag = dev->load_shader("mesh.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
     SDL_GPUShader *edge_vert = dev->load_shader("edge.vert", SDL_GPU_SHADERSTAGE_VERTEX, 1);
     SDL_GPUShader *edge_frag = dev->load_shader("edge.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
+    SDL_GPUShader *grid_vert = dev->load_shader("grid.vert", SDL_GPU_SHADERSTAGE_VERTEX, 1);
+    SDL_GPUShader *grid_frag = dev->load_shader("grid.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
 
-    bool ok = mesh_vert && mesh_frag && edge_vert && edge_frag;
+    bool ok = mesh_vert && mesh_frag && edge_vert && edge_frag && grid_vert && grid_frag;
 
     SDL_GPUColorTargetDescription color_target{};
     color_target.format = color_format;
@@ -102,6 +125,7 @@ bool model_renderer::init(gpu::device &device, SDL_GPUTextureFormat swapchain_fo
     multisample.sample_count = sample_count;
 
     // shaded triangles - pushed back a bit so the edges drawn on top win the depth test
+    // (depth is reversed so further away is smaller, hence the negative bias)
     // transparent ones are blended, don't write depth and are drawn back faces then front faces
 
     auto create_mesh_pipeline = [&](char const *name, SDL_GPUCullMode cull_mode, bool transparent) -> SDL_GPUGraphicsPipeline * {
@@ -127,11 +151,11 @@ bool model_renderer::init(gpu::device &device, SDL_GPUTextureFormat swapchain_fo
         ci.rasterizer_state.cull_mode = cull_mode;
         ci.rasterizer_state.front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
         ci.rasterizer_state.enable_depth_bias = true;
-        ci.rasterizer_state.depth_bias_constant_factor = 2.0f;
-        ci.rasterizer_state.depth_bias_slope_factor = 1.5f;
+        ci.rasterizer_state.depth_bias_constant_factor = -2.0f;
+        ci.rasterizer_state.depth_bias_slope_factor = -1.5f;
         ci.depth_stencil_state.enable_depth_test = true;
         ci.depth_stencil_state.enable_depth_write = !transparent;
-        ci.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS_OR_EQUAL;    // selected parts get drawn twice
+        ci.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_GREATER_OR_EQUAL;    // selected parts get drawn twice
         ci.multisample_state = multisample;
 
         SDL_GPUColorTargetDescription blended_target = color_target;
@@ -184,7 +208,7 @@ bool model_renderer::init(gpu::device &device, SDL_GPUTextureFormat swapchain_fo
         ci.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
         ci.depth_stencil_state.enable_depth_test = true;
         ci.depth_stencil_state.enable_depth_write = true;
-        ci.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS_OR_EQUAL;
+        ci.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_GREATER_OR_EQUAL;
         ci.multisample_state = multisample;
         ci.target_info = target_info;
 
@@ -195,8 +219,55 @@ bool model_renderer::init(gpu::device &device, SDL_GPUTextureFormat swapchain_fo
         }
     }
 
+    // grid - blended, depth tested but doesn't write depth
+
+    if(ok) {
+        SDL_GPUVertexBufferDescription buffer{};
+        buffer.slot = 0;
+        buffer.pitch = sizeof(grid_vertex);
+        buffer.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+
+        SDL_GPUVertexAttribute attribute{ 0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(grid_vertex, corner) };
+
+        SDL_GPUColorTargetDescription blended_target = color_target;
+        SDL_GPUColorTargetBlendState &blend = blended_target.blend_state;
+        blend.enable_blend = true;
+        blend.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+        blend.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+        blend.color_blend_op = SDL_GPU_BLENDOP_ADD;
+        blend.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        blend.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+        blend.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+
+        SDL_GPUGraphicsPipelineCreateInfo ci{};
+        ci.vertex_shader = grid_vert;
+        ci.fragment_shader = grid_frag;
+        ci.vertex_input_state.vertex_buffer_descriptions = &buffer;
+        ci.vertex_input_state.num_vertex_buffers = 1;
+        ci.vertex_input_state.vertex_attributes = &attribute;
+        ci.vertex_input_state.num_vertex_attributes = 1;
+        ci.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLESTRIP;
+        ci.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+        ci.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+        ci.depth_stencil_state.enable_depth_test = true;
+        ci.depth_stencil_state.enable_depth_write = false;
+        ci.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_GREATER_OR_EQUAL;
+        ci.multisample_state = multisample;
+        ci.target_info = target_info;
+        ci.target_info.color_target_descriptions = &blended_target;
+
+        grid_pipeline = SDL_CreateGPUGraphicsPipeline(gpu, &ci);
+        if(grid_pipeline == nullptr) {
+            LOG_ERROR("Can't create grid pipeline: {}", SDL_GetError());
+            ok = false;
+        }
+
+        grid_vertex const square[4] = { { { -1, -1 } }, { { 1, -1 } }, { { -1, 1 } }, { { 1, 1 } } };
+        grid_buffer = dev->create_buffer(SDL_GPU_BUFFERUSAGE_VERTEX, square, sizeof(square), "grid");
+    }
+
     // pipelines keep what they need from the shaders
-    for(SDL_GPUShader *shader : { mesh_vert, mesh_frag, edge_vert, edge_frag }) {
+    for(SDL_GPUShader *shader : { mesh_vert, mesh_frag, edge_vert, edge_frag, grid_vert, grid_frag }) {
         if(shader != nullptr) {
             SDL_ReleaseGPUShader(gpu, shader);
         }
@@ -214,7 +285,11 @@ void model_renderer::cleanup()
     }
     clear_model();
     release_targets();
-    for(SDL_GPUGraphicsPipeline **pipeline : { &mesh_pipeline, &transparent_back_pipeline, &transparent_front_pipeline }) {
+    if(grid_buffer != nullptr) {
+        SDL_ReleaseGPUBuffer(dev->gpu, grid_buffer);
+        grid_buffer = nullptr;
+    }
+    for(SDL_GPUGraphicsPipeline **pipeline : { &mesh_pipeline, &transparent_back_pipeline, &transparent_front_pipeline, &grid_pipeline }) {
         if(*pipeline != nullptr) {
             SDL_ReleaseGPUGraphicsPipeline(dev->gpu, *pipeline);
             *pipeline = nullptr;
@@ -244,6 +319,21 @@ void model_renderer::set_model(step_model const &model)
         }
     }
 
+    // a long way, perspective has no far plane so they go off to the horizon
+    {
+        gpu::vec3 origin{ (float)-model.center[0], (float)-model.center[1], (float)-model.center[2] };
+        float length = (float)model.radius * 1e4f;
+        edge_vertex axes[6];
+        for(int axis = 0; axis < 3; ++axis) {
+            gpu::vec3 direction{ axis == 0 ? length : 0.0f, axis == 1 ? length : 0.0f, axis == 2 ? length : 0.0f };
+            gpu::vec3 a = origin - direction;
+            gpu::vec3 b = origin + direction;
+            axes[axis * 2] = { { a.x, a.y, a.z } };
+            axes[axis * 2 + 1] = { { b.x, b.y, b.z } };
+        }
+        axes_buffer = dev->create_buffer(SDL_GPU_BUFFERUSAGE_VERTEX, axes, sizeof(axes), "axes");
+    }
+
     if(!model.edges.empty()) {
         edge_buffer =
             dev->create_buffer(SDL_GPU_BUFFERUSAGE_VERTEX, model.edges.data(), (uint32_t)(model.edges.size() * sizeof(edge_vertex)), "model edges");
@@ -257,7 +347,7 @@ void model_renderer::set_model(step_model const &model)
 
 void model_renderer::clear_model()
 {
-    for(SDL_GPUBuffer **buffer : { &vertex_buffer, &index_buffer, &edge_buffer }) {
+    for(SDL_GPUBuffer **buffer : { &vertex_buffer, &index_buffer, &edge_buffer, &axes_buffer }) {
         if(*buffer != nullptr) {
             SDL_ReleaseGPUBuffer(dev->gpu, *buffer);
             *buffer = nullptr;
@@ -344,7 +434,7 @@ void model_renderer::render(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *swapchain
 
     SDL_GPUDepthStencilTargetInfo depth{};
     depth.texture = depth_texture;
-    depth.clear_depth = 1.0f;
+    depth.clear_depth = 0.0f;    // reversed, 0 is far
     depth.load_op = SDL_GPU_LOADOP_CLEAR;
     depth.store_op = SDL_GPU_STOREOP_DONT_CARE;
     depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
@@ -406,6 +496,36 @@ void model_renderer::render(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *swapchain
                 params.parts,
                 [](step_part const &part) { return std::pair{ part.first_edge_vertex, part.num_edge_vertices }; },
                 [&](uint32_t first, uint32_t count) { SDL_DrawGPUPrimitives(pass, count, 1, first, 0); });
+        }
+
+        // axes
+        if(params.show_axes && axes_buffer != nullptr) {
+            SDL_BindGPUGraphicsPipeline(pass, edge_pipeline);
+            SDL_PushGPUVertexUniformData(cmd, 0, &uniforms, sizeof(uniforms));
+            SDL_GPUBufferBinding vertices{ axes_buffer, 0 };
+            SDL_BindGPUVertexBuffers(pass, 0, &vertices, 1);
+            for(int axis = 0; axis < 3; ++axis) {
+                color_uniforms color;
+                std::copy(axis_colors[axis], axis_colors[axis] + 4, color.color);
+                SDL_PushGPUFragmentUniformData(cmd, 0, &color, sizeof(color));
+                SDL_DrawGPUPrimitives(pass, 2, 1, axis * 2, 0);
+            }
+        }
+
+        // grid, transparent parts blend over it
+        if(params.show_grid && grid_buffer != nullptr) {
+            grid_vertex_uniforms grid_vertex_data{ params.view, params.projection, {} };
+            std::copy(params.grid_plane, params.grid_plane + 4, grid_vertex_data.plane);
+            grid_fragment_uniforms grid_fragment_data{};
+            std::copy(params.grid_color, params.grid_color + 4, grid_fragment_data.color);
+            std::copy(params.grid_lines, params.grid_lines + 4, grid_fragment_data.lines);
+            std::copy(params.grid_fade, params.grid_fade + 4, grid_fragment_data.fade);
+            SDL_BindGPUGraphicsPipeline(pass, grid_pipeline);
+            SDL_PushGPUVertexUniformData(cmd, 0, &grid_vertex_data, sizeof(grid_vertex_data));
+            SDL_PushGPUFragmentUniformData(cmd, 0, &grid_fragment_data, sizeof(grid_fragment_data));
+            SDL_GPUBufferBinding vertices{ grid_buffer, 0 };
+            SDL_BindGPUVertexBuffers(pass, 0, &vertices, 1);
+            SDL_DrawGPUPrimitives(pass, 4, 1, 0, 0);
         }
 
         // transparent parts, furthest first

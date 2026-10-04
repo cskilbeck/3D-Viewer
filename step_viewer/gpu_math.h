@@ -102,16 +102,27 @@ namespace gpu
             return r;
         }
 
-        // right handed perspective projection, depth 0..1
-        static mat4 perspective(float fov_y, float aspect, float near_z, float far_z)
+        // right handed perspective projection, reversed depth (near = 1, infinitely far away = 0)
+        static mat4 perspective_reversed_infinite(float fov_y, float aspect, float near_z)
         {
             float y = 1.0f / std::tan(fov_y * 0.5f);
             mat4 r;
             r.at(0, 0) = y / aspect;
             r.at(1, 1) = y;
-            r.at(2, 2) = far_z / (near_z - far_z);
-            r.at(2, 3) = near_z * far_z / (near_z - far_z);
+            r.at(2, 3) = near_z;
             r.at(3, 2) = -1;
+            return r;
+        }
+
+        // right handed orthographic projection, reversed depth (near = 1, far = 0)
+        static mat4 orthographic_reversed(float half_width, float half_height, float near_z, float far_z)
+        {
+            mat4 r;
+            r.at(0, 0) = 1.0f / half_width;
+            r.at(1, 1) = 1.0f / half_height;
+            r.at(2, 2) = 1.0f / (far_z - near_z);
+            r.at(2, 3) = far_z / (far_z - near_z);
+            r.at(3, 3) = 1;
             return r;
         }
     };

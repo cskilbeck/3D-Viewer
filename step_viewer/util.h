@@ -15,6 +15,12 @@ extern char const *app_friendly_name;
 
 std::filesystem::path config_path(std::string const &application_name, std::string const &filename);
 
+// the user's home directory (%USERPROFILE% on Windows, $HOME elsewhere)
+std::filesystem::path home_path();
+
+// ~/3DViewer.settings
+std::filesystem::path settings_path();
+
 // ImGui helpers
 bool IconCheckbox(const char *label, bool *v, const char *icon_on, const char *icon_off);
 bool IconCheckboxTristate(const char *label, int *v, const char *icon_on, const char *icon_off, const char *icon_mixed);

@@ -22,7 +22,7 @@ include(${CMAKE_SOURCE_DIR}/cmake/compile_shaders.cmake)
 set(HLSL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/shaders_hlsl")
 set(MSL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/shaders_msl")
 
-set(SHADERS mesh edge)
+set(SHADERS mesh edge grid)
 
 if(APPLE)
     set(ALL_MSL_FILES "")

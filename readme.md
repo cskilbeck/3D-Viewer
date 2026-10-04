@@ -32,9 +32,22 @@ Mesh formats have no CAD edges, so the sharp ones (where the surface bends by mo
 | Wheel | Zoom |
 | F / Fit button | Fit the selection (or the whole model) in the view |
 | E / Edges checkbox | Toggle edges |
+| G / Grid checkbox | Grid on the XY plane |
+| X / Axes checkbox | X/Y/Z axes through the origin |
+| Space | Reset view (isometric, whole model) |
+| I | Isolate the selection (hide everything else) / Unisolate (show everything) |
+| Esc | Quit |
 | Ctrl+O | Open |
 
-A file can also be dropped on the window or passed on the command line.
+A file can also be dropped on the window or passed on the command line. File > Open Recent has the last 10.
+
+Rotation is turntable (Z stays up) by default, trackball (free rotation) is in the settings, as is orthographic projection.
+
+## Settings
+
+View > Settings... opens the settings window (projection, rotation style, grid, selection tint, zoom...). Changes take effect straight away; **Revert** goes back to how things were when the window was opened and **Defaults** resets everything.
+
+Settings (and the window position) are saved in `~/3DViewer.settings` (`%USERPROFILE%DViewer.settings` on Windows).
 
 ## Build Instructions
 

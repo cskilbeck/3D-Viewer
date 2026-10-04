@@ -869,6 +869,34 @@ void step_model::set_visible(int node, bool visible)
 }
 
 //////////////////////////////////////////////////////////////////////
+// the node, everything under it and the nodes above it (so it's not hidden by them) stay visible
+
+void step_model::isolate(int node)
+{
+    if(node < 0 || node >= (int)nodes.size()) {
+        return;
+    }
+    for(int i = 0; i < (int)nodes.size(); ++i) {
+        nodes[i].visible = is_ancestor(i, node) || is_ancestor(node, i);
+    }
+    for(int root : roots) {
+        update_visibility(root, true);
+    }
+}
+
+//////////////////////////////////////////////////////////////////////
+
+void step_model::show_all()
+{
+    for(step_node &node : nodes) {
+        node.visible = true;
+    }
+    for(int root : roots) {
+        update_visibility(root, true);
+    }
+}
+
+//////////////////////////////////////////////////////////////////////
 
 void step_model::update_visibility(int node, bool parent_visible)
 {

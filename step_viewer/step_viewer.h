@@ -70,14 +70,25 @@ struct step_viewer : gpu_window
     // how far one zoom click moves the camera from eye
     float zoom_click_distance(gpu::vec3 const &eye) const;
 
-    // smoothed wheel zoom: what's left to move, used up over a few frames
-    gpu::vec3 pending_zoom{};
+    // a point on the plane through the camera target (at right angles to the view) under the mouse
+    gpu::vec3 view_plane_point(float x, float y) const;
+
+    // zoom by some (fractional) wheel clicks, keeping what's under x, y where it is
+    void apply_zoom(float clicks, float x, float y);
+
+    // smoothed wheel zoom: clicks still to do, used up over a few frames
+    float pending_zoom{};
+    float pending_zoom_x{};
+    float pending_zoom_y{};
     double pending_zoom_time{};
     void update_zoom(double now);
     void stop_zoom()
     {
-        pending_zoom = {};
+        pending_zoom = 0;
     }
+
+    void handle_shortcuts();
+    void add_recent_file(std::filesystem::path const &path);
     float pan_depth{};           // depth of the point grabbed when panning started
 
     void start_pan();
@@ -92,6 +103,10 @@ struct step_viewer : gpu_window
     bool reveal_selection{ false };    // expand + scroll the tree to show it
 
     void select_node(int node, bool reveal);
+
+    // View > Isolate hides everything but the selection, Unisolate shows everything again
+    bool isolated{ false };
+    void toggle_isolate();
     void pick(float x, float y);
 
     bool mouse_in_viewport() const;
@@ -128,6 +143,19 @@ struct step_viewer : gpu_window
     void model_tree_ui(int node_index, bool parent_visible);
 
     settings_t settings;
+
+    // settings dialog, Revert goes back to how things were when it was opened
+    bool settings_open{ false };
+    settings_t settings_snapshot;
+
+    void open_settings();
+    void revert_settings();
+    void default_settings();
+    void settings_ui();
+
+    // "Loading <file>" + progress bar, goes in the Info window, or the toolbar, or its own window
+    std::string loading_text() const;
+    void loading_window_ui();
 
     void open_file(std::filesystem::path const &path);
 

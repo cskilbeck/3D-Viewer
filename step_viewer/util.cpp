@@ -19,9 +19,9 @@
 
 char const *app_name{ "step_viewer" };
 char const *app_friendly_name{ "3D Viewer" };
-char const *settings_filename{ "settings.json" };
+char const *settings_filename{ "3DViewer.settings" };
 
-#if defined(__APPLE__)
+#if !defined(_WIN32)
 #include <pwd.h>
 #endif
 
@@ -100,6 +100,42 @@ std::filesystem::path config_path(std::string const &application_name, std::stri
     }
 
     return base_path / filename;
+}
+
+//////////////////////////////////////////////////////////////////////
+
+std::filesystem::path home_path()
+{
+    namespace fs = std::filesystem;
+#if defined(_WIN32)
+    // wide version so non-ascii user names work
+    if(wchar_t const *profile = _wgetenv(L"USERPROFILE"); profile != nullptr && profile[0] != 0) {
+        return fs::path(profile);
+    }
+    wchar_t const *drive = _wgetenv(L"HOMEDRIVE");
+    wchar_t const *path = _wgetenv(L"HOMEPATH");
+    if(drive != nullptr && path != nullptr) {
+        return fs::path(std::wstring(drive) + path);
+    }
+    return fs::current_path();
+#else
+    char const *home = std::getenv("HOME");
+    if(home != nullptr && home[0] != '\0') {
+        return fs::path(home);
+    }
+    struct passwd *pw = getpwuid(getuid());
+    if(pw != nullptr && pw->pw_dir != nullptr) {
+        return fs::path(pw->pw_dir);
+    }
+    return fs::temp_directory_path();
+#endif
+}
+
+//////////////////////////////////////////////////////////////////////
+
+std::filesystem::path settings_path()
+{
+    return home_path() / settings_filename;
 }
 
 //////////////////////////////////////////////////////////////////////

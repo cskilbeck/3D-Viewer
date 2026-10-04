@@ -15,11 +15,44 @@ namespace
     // keep away from straight up/down where the turntable flips over
     float constexpr max_pitch = pi * 0.5f - 0.001f;
 
-
     // zooming out stops when the scene is this many pixels across
     float constexpr min_scene_pixels = 10.0f;
 
+    // orthographic zoom, each wheel click scales the view by this
+    float constexpr ortho_zoom_step = 0.85f;
+
     gpu::vec3 const world_up{ 0, 0, 1 };
+
+    //////////////////////////////////////////////////////////////////////
+    // rotate v around a unit axis
+
+    gpu::vec3 rotate(gpu::vec3 const &v, gpu::vec3 const &axis, float angle)
+    {
+        float c = std::cos(angle);
+        float s = std::sin(angle);
+        return v * c + gpu::cross(axis, v) * s + axis * (gpu::dot(axis, v) * (1.0f - c));
+    }
+
+    //////////////////////////////////////////////////////////////////////
+    // forward from turntable angles (yaw around Z, pitch above the XY plane)
+
+    gpu::vec3 forward_from(float yaw, float pitch)
+    {
+        return { -std::cos(pitch) * std::cos(yaw), -std::cos(pitch) * std::sin(yaw), -std::sin(pitch) };
+    }
+
+    //////////////////////////////////////////////////////////////////////
+    // an up vector at right angles to forward, as close to Z as possible
+
+    gpu::vec3 level_up(gpu::vec3 const &forward, gpu::vec3 const &fallback)
+    {
+        gpu::vec3 right = gpu::cross(forward, world_up);
+        if(right.length() < 1e-6f) {
+            // looking straight up/down, keep whatever up we had
+            right = gpu::cross(forward, fallback);
+        }
+        return gpu::normalize(gpu::cross(gpu::normalize(right), forward));
+    }
 
 }    // namespace
 
@@ -27,14 +60,31 @@ namespace
 
 void camera::set_isometric()
 {
-    yaw = -pi * 0.25f;
-    pitch = std::atan(1.0f / std::sqrt(2.0f));
+    forward = forward_from(-pi * 0.25f, std::atan(1.0f / std::sqrt(2.0f)));
+    up = level_up(forward, up);
 }
 
 //////////////////////////////////////////////////////////////////////
-// A corner at view depth (distance + z) is inside the (shrunk) frustum if
-// |x| <= (distance + z) * tan(half fov) so the distance has to be at least
-// |x| / tan(half fov) - z for every corner, horizontally and vertically
+
+void camera::level()
+{
+    // turntable can't look straight up/down
+    float pitch = std::asin(std::clamp(-forward.z, -1.0f, 1.0f));
+    if(std::abs(pitch) > max_pitch) {
+        float yaw = std::atan2(-forward.y, -forward.x);
+        forward = forward_from(yaw, std::clamp(pitch, -max_pitch, max_pitch));
+    }
+    up = level_up(forward, up);
+}
+
+//////////////////////////////////////////////////////////////////////
+
+bool camera::is_level() const
+{
+    return gpu::dot(up, level_up(forward, up)) > 0.99999f && std::abs(forward.z) < std::sin(max_pitch);
+}
+
+//////////////////////////////////////////////////////////////////////
 
 void camera::fit_box(gpu::vec3 const &box_min, gpu::vec3 const &box_max, float aspect, float border)
 {
@@ -43,6 +93,10 @@ void camera::fit_box(gpu::vec3 const &box_min, gpu::vec3 const &box_max, float a
 }
 
 //////////////////////////////////////////////////////////////////////
+// Perspective: a corner at view depth (distance + z) is inside the (shrunk)
+// frustum if |x| <= (distance + z) * tan(half fov), so the distance has to be
+// at least |x| / tan(half fov) - z for every corner, horizontally and vertically
+// Orthographic: the half height of the view has to be at least |y| and |x| / aspect
 
 void camera::fit_box_target(gpu::vec3 const &box_min, gpu::vec3 const &box_max, float aspect, float border, gpu::vec3 &new_target, float &new_distance) const
 {
@@ -51,7 +105,8 @@ void camera::fit_box_target(gpu::vec3 const &box_min, gpu::vec3 const &box_max, 
     basis_t b = basis();
 
     float scale = std::max(1.0f - 2.0f * border, 0.05f);
-    float tan_y = std::tan(fov_y * 0.5f) * scale;
+    float tan_half_fov = std::tan(fov_y * 0.5f);
+    float tan_y = tan_half_fov * scale;
     float tan_x = tan_y * aspect;
 
     float d = 0;
@@ -60,8 +115,12 @@ void camera::fit_box_target(gpu::vec3 const &box_min, gpu::vec3 const &box_max, 
         gpu::vec3 c = corner - new_target;
         float x = std::abs(gpu::dot(c, b.right));
         float y = std::abs(gpu::dot(c, b.up));
-        float z = gpu::dot(c, b.forward);
-        d = std::max({ d, x / tan_x - z, y / tan_y - z });
+        if(orthographic) {
+            d = std::max({ d, x / tan_x, y / tan_y });
+        } else {
+            float z = gpu::dot(c, b.forward);
+            d = std::max({ d, x / tan_x - z, y / tan_y - z });
+        }
     }
 
     new_distance = std::max(d, scene_radius * 1e-4f);
@@ -111,26 +170,36 @@ bool camera::update(double now)
 }
 
 //////////////////////////////////////////////////////////////////////
-// Turning the camera also swings it around the pivot: express the eye
-// relative to the pivot in the old camera basis, rebuild it in the new one
+// Turntable: yaw around Z, pitch up/down (clamped), Z stays up
+// Trackball: turn around the camera's own up and right axes, no limits
+// Either way the target swings around the pivot: express it relative to
+// the pivot in the old camera basis, rebuild it in the new one
 
 void camera::orbit(float dx, float dy, gpu::vec3 const *pivot)
 {
-    gpu::vec3 old_eye = eye();
     basis_t old_basis = basis();
 
-    yaw -= dx * orbit_speed;
-    pitch = std::clamp(pitch + dy * orbit_speed, -max_pitch, max_pitch);
+    if(trackball) {
+        forward = rotate(forward, old_basis.up, -dx * orbit_speed);
+        gpu::vec3 right = gpu::normalize(gpu::cross(forward, old_basis.up));
+        forward = gpu::normalize(rotate(forward, right, -dy * orbit_speed));
+        up = gpu::normalize(gpu::cross(right, forward));
+    } else {
+        float yaw = std::atan2(-forward.y, -forward.x) - dx * orbit_speed;
+        float pitch = std::asin(std::clamp(-forward.z, -1.0f, 1.0f));
+        pitch = std::clamp(pitch + dy * orbit_speed, -max_pitch, max_pitch);
+        forward = forward_from(yaw, pitch);
+        up = level_up(forward, up);
+    }
 
     if(pivot == nullptr) {
         return;
     }
 
     basis_t new_basis = basis();
-    gpu::vec3 rel = old_eye - *pivot;
-    gpu::vec3 new_eye = *pivot + new_basis.right * gpu::dot(rel, old_basis.right) + new_basis.up * gpu::dot(rel, old_basis.up) +
-                        new_basis.forward * gpu::dot(rel, old_basis.forward);
-    target = new_eye + new_basis.forward * distance;
+    gpu::vec3 rel = target - *pivot;
+    target = *pivot + new_basis.right * gpu::dot(rel, old_basis.right) + new_basis.up * gpu::dot(rel, old_basis.up) +
+             new_basis.forward * gpu::dot(rel, old_basis.forward);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -138,15 +207,13 @@ void camera::orbit(float dx, float dy, gpu::vec3 const *pivot)
 
 void camera::pan(float dx, float dy, float viewport_height, float depth)
 {
-    float world_per_pixel = 2.0f * depth * std::tan(fov_y * 0.5f) / std::max(viewport_height, 1.0f);
+    float view_height = orthographic ? half_height() * 2.0f : 2.0f * depth * std::tan(fov_y * 0.5f);
+    float world_per_pixel = view_height / std::max(viewport_height, 1.0f);
     basis_t b = basis();
     target = target - b.right * (dx * world_per_pixel) + b.up * (dy * world_per_pixel);
 }
 
 //////////////////////////////////////////////////////////////////////
-
-// Moving the eye along the line to the point keeps the point on the same
-// pixel - scale the eye's (and target's) offset from the point
 
 void camera::move(gpu::vec3 const &delta, float viewport_height)
 {
@@ -169,13 +236,45 @@ void camera::move(gpu::vec3 const &delta, float viewport_height)
 }
 
 //////////////////////////////////////////////////////////////////////
+// Scaling the target's sideways offset from the point (depth doesn't matter
+// in orthographic) keeps the point on the same pixel
+
+void camera::scale_view(float wheel_clicks, gpu::vec3 const &point, float viewport_height)
+{
+    // scene's bounding sphere no smaller than min_scene_pixels
+    float max_distance = scene_radius * std::max(viewport_height, 1.0f) / (min_scene_pixels * std::tan(fov_y * 0.5f));
+    float new_distance = std::clamp(distance * std::pow(ortho_zoom_step, wheel_clicks), scene_radius * 1e-5f, std::max(max_distance, distance));
+    float scale = new_distance / distance;
+
+    basis_t b = basis();
+    gpu::vec3 offset = target - point;
+    float along = gpu::dot(offset, b.forward);
+    gpu::vec3 sideways = offset - b.forward * along;
+    target = point + sideways * scale + b.forward * along;
+    distance = new_distance;
+}
+
+//////////////////////////////////////////////////////////////////////
 
 void camera::ray(float ndc_x, float ndc_y, float aspect, gpu::vec3 &origin, gpu::vec3 &direction) const
 {
-    origin = eye();
     basis_t b = basis();
-    float t = std::tan(fov_y * 0.5f);
-    direction = gpu::normalize(b.forward + b.right * (ndc_x * t * aspect) + b.up * (ndc_y * t));
+    if(orthographic) {
+        float h = half_height();
+        origin = eye() + b.right * (ndc_x * h * aspect) + b.up * (ndc_y * h);
+        direction = b.forward;
+    } else {
+        origin = eye();
+        float t = std::tan(fov_y * 0.5f);
+        direction = gpu::normalize(b.forward + b.right * (ndc_x * t * aspect) + b.up * (ndc_y * t));
+    }
+}
+
+//////////////////////////////////////////////////////////////////////
+
+float camera::half_height() const
+{
+    return distance * std::tan(fov_y * 0.5f);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -183,33 +282,44 @@ void camera::ray(float ndc_x, float ndc_y, float aspect, gpu::vec3 &origin, gpu:
 camera::basis_t camera::basis() const
 {
     basis_t b;
-    b.forward = { -std::cos(pitch) * std::cos(yaw), -std::cos(pitch) * std::sin(yaw), -std::sin(pitch) };
-    b.right = gpu::normalize(gpu::cross(b.forward, world_up));
-    b.up = gpu::cross(b.right, b.forward);
+    b.forward = forward;
+    b.right = gpu::normalize(gpu::cross(forward, up));
+    b.up = gpu::cross(b.right, forward);
     return b;
 }
 
 //////////////////////////////////////////////////////////////////////
+// orthographic pulls the eye back out of the scene (it doesn't change what's
+// visible, just keeps the whole scene in front of it)
 
 gpu::vec3 camera::eye() const
 {
-    return target - basis().forward * distance;
+    float back = distance;
+    if(orthographic) {
+        back = std::max(distance, target.length() + scene_radius * 2.0f);
+    }
+    return target - forward * back;
 }
 
 //////////////////////////////////////////////////////////////////////
 
 gpu::mat4 camera::view_matrix() const
 {
-    return gpu::mat4::look_at(eye(), target, world_up);
+    return gpu::mat4::look_at(eye(), target, basis().up);
 }
 
 //////////////////////////////////////////////////////////////////////
-// near/far planes hug the scene's bounding sphere (centered on the origin)
+// Reversed Z keeps the depth precision good everywhere, so the near plane can
+// be very close and perspective can go out to infinity (the grid and axes)
 
 gpu::mat4 camera::projection_matrix(float aspect) const
 {
     float eye_distance = eye().length();
-    float far_z = eye_distance + scene_radius * 1.1f;
-    float near_z = std::max(eye_distance - scene_radius * 1.1f, far_z * 1e-5f);
-    return gpu::mat4::perspective(fov_y, aspect, near_z, far_z);
+    if(orthographic) {
+        float h = half_height();
+        float far_z = eye_distance + std::max(scene_radius * 1.1f, far_extent);
+        return gpu::mat4::orthographic_reversed(h * aspect, h, 0.0f, far_z);
+    }
+    float near_z = std::max(scene_radius * 1e-5f, eye_distance * 1e-4f);
+    return gpu::mat4::perspective_reversed_infinite(fov_y, aspect, near_z);
 }
