@@ -51,6 +51,10 @@ struct camera
     // look from the front (-Y) right (+X) and above
     void set_isometric();
 
+    // look in a direction with up roughly up_hint (turntable can't look straight up/down
+    // so it stops just short, turned so up_hint is still up on the screen)
+    void look_along(gpu::vec3 const &direction, gpu::vec3 const &up_hint);
+
     // take out any roll so Z points up (for turntable mode)
     void level();
     bool is_level() const;

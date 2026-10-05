@@ -265,8 +265,31 @@ gpu::vec3 step_viewer::point_under_mouse(float x, float y) const
 void step_viewer::start_pan()
 {
     dragging = drag_mode::pan;
-    gpu::vec3 grabbed = point_under_mouse(mouse_x, mouse_y);
-    pan_depth = std::max(gpu::dot(grabbed - cam.eye(), cam.basis().forward), cam.distance * 1e-3f);
+
+    gpu::vec3 eye = cam.eye();
+    gpu::vec3 forward = cam.basis().forward;
+
+    // over the model: the surface under the mouse
+    // over empty space: the middle of the model (the origin, vertices are relative to it), not the camera
+    // target which zooming leaves just in front of the camera
+    gpu::vec3 origin;
+    gpu::vec3 direction;
+    float ndc_x = viewport_width > 0 ? (mouse_x - viewport_xpos) / viewport_width * 2.0f - 1.0f : 0.0f;
+    float ndc_y = viewport_height > 0 ? 1.0f - (mouse_y - viewport_ypos) / viewport_height * 2.0f : 0.0f;
+    cam.ray(ndc_x, ndc_y, viewport_aspect(), origin, direction);
+
+    std::vector<pick_hit> hits;
+    if(model != nullptr) {
+        hits = model->pick(origin, direction);
+    }
+    if(!hits.empty()) {
+        pan_depth = gpu::dot(origin + direction * hits[0].distance - eye, forward);
+    } else {
+        pan_depth = gpu::dot(gpu::vec3{} - eye, forward);
+    }
+
+    // in (or past) the model the depth gets tiny, don't let it crawl
+    pan_depth = std::max(pan_depth, cam.scene_radius * 0.1f);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -459,6 +482,39 @@ void step_viewer::fit_to_view()
         cam.animate_to(new_target, new_distance, get_time(), settings.fit_duration);
         set_active();
     }
+}
+
+//////////////////////////////////////////////////////////////////////
+
+void step_viewer::axis_view(int axis)
+{
+    gpu::vec3 box_min;
+    gpu::vec3 box_max;
+    if(!selection_bounds(box_min, box_max) && !model_bounds(box_min, box_max)) {
+        return;
+    }
+
+    // the same button again and the camera's exactly where it left it: other side
+    bool unmoved = axis == last_axis_view && cam.target.x == last_axis_view_target.x && cam.target.y == last_axis_view_target.y &&
+                   cam.target.z == last_axis_view_target.z && cam.forward.x == last_axis_view_forward.x &&
+                   cam.forward.y == last_axis_view_forward.y && cam.forward.z == last_axis_view_forward.z && cam.distance == last_axis_view_distance;
+    bool positive = unmoved ? !last_axis_view_positive : true;
+
+    // from the positive side means looking towards negative
+    float sign = positive ? -1.0f : 1.0f;
+    gpu::vec3 direction{ axis == 0 ? sign : 0.0f, axis == 1 ? sign : 0.0f, axis == 2 ? sign : 0.0f };
+    gpu::vec3 up_hint = axis == 2 ? gpu::vec3{ 0, 1, 0 } : gpu::vec3{ 0, 0, 1 };
+
+    stop_zoom();
+    cam.look_along(direction, up_hint);
+    cam.fit_box(box_min, box_max, viewport_aspect(), settings.fit_border);
+    set_active();
+
+    last_axis_view = axis;
+    last_axis_view_positive = positive;
+    last_axis_view_target = cam.target;
+    last_axis_view_forward = cam.forward;
+    last_axis_view_distance = cam.distance;
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -887,14 +943,8 @@ void step_viewer::settings_ui()
         ImGui::Checkbox("Info", &settings.view_info);
 
         ImGui::SeparatorText("View");
-        int projection = settings.orthographic ? 1 : 0;
-        if(ImGui::Combo("Projection", &projection, "Perspective\0Orthographic\0")) {
-            settings.orthographic = projection == 1;
-        }
-        int rotation = settings.trackball ? 1 : 0;
-        if(ImGui::Combo("Rotation", &rotation, "Turntable (Z up)\0Trackball (free)\0")) {
-            settings.trackball = rotation == 1;
-        }
+        SegmentedControl("Projection", &settings.orthographic, "Perspective", "Orthographic");
+        SegmentedControl("Rotation", &settings.trackball, "Turntable", "Trackball");
         ImGui::SetItemTooltip("Turntable keeps Z pointing up, trackball rotates freely in any direction");
         ImGui::Checkbox("Axes", &settings.show_axes);
         ImGui::SetItemTooltip("X, Y and Z axes through the origin (red, green, blue)");
@@ -902,8 +952,34 @@ void step_viewer::settings_ui()
         ImGui::SeparatorText("Grid");
         ImGui::Checkbox("Show grid", &settings.show_grid);
         ImGui::SetItemTooltip("Grid on the XY plane");
-        ImGui::SliderFloat("Spacing", &settings.grid_spacing, 0.01f, 1000.0f, "%.3g", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp);
-        ImGui::SetItemTooltip("Distance between grid lines (every 10th line is stronger)");
+        {
+            // the slider snaps to 1, 2, 5, 10, 20, 50... the box takes anything
+            static float const nice_spacings[] = { 0.01f, 0.02f, 0.05f, 0.1f, 0.2f, 0.5f, 1.0f,  2.0f,   5.0f,   10.0f,
+                                                   20.0f, 50.0f, 100.0f, 200.0f, 500.0f, 1000.0f };
+            int const num_spacings = (int)std::size(nice_spacings);
+
+            // nearest (in log terms) to the current value
+            int index = 0;
+            for(int i = 1; i < num_spacings; ++i) {
+                if(std::abs(std::log(nice_spacings[i] / settings.grid_spacing)) < std::abs(std::log(nice_spacings[index] / settings.grid_spacing))) {
+                    index = i;
+                }
+            }
+
+            float const box_width = ImGui::GetFontSize() * 4;
+            ImGui::SetNextItemWidth(slider_width - box_width - ImGui::GetStyle().ItemInnerSpacing.x);
+            std::string label = std::format("{:g}", nice_spacings[index]);
+            if(ImGui::SliderInt("##spacing_slider", &index, 0, num_spacings - 1, label.c_str(), ImGuiSliderFlags_AlwaysClamp)) {
+                settings.grid_spacing = nice_spacings[index];
+            }
+            ImGui::SetItemTooltip("Distance between grid lines (every 10th line is stronger)");
+            ImGui::SameLine(0, ImGui::GetStyle().ItemInnerSpacing.x);
+            ImGui::SetNextItemWidth(box_width);
+            if(ImGui::InputFloat("Spacing", &settings.grid_spacing, 0, 0, "%g")) {
+                settings.grid_spacing = std::clamp(settings.grid_spacing, 0.001f, 100000.0f);
+            }
+            ImGui::SetItemTooltip("Any spacing (e.g. 2.54 for 0.1\")");
+        }
         ImGui::ColorEdit4("Grid color", (float *)settings.grid_color, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
 
         ImGui::SeparatorText("Selection");
@@ -1127,6 +1203,14 @@ void step_viewer::ui()
                 fit_to_view();
             }
             ImGui::SetItemTooltip("Fit the selection (or everything) in the view (F)");
+            for(int axis = 0; axis < 3; ++axis) {
+                char const *names[] = { "X", "Y", "Z" };
+                ImGui::SameLine();
+                if(ImGui::Button(names[axis])) {
+                    axis_view(axis);
+                }
+                ImGui::SetItemTooltip("Look along %s at the selection (or everything)\nclick again for the other side", names[axis]);
+            }
             ImGui::EndDisabled();
             ImGui::SameLine();
             ImGui::BeginDisabled(model == nullptr || (!isolated && selected_node < 0));
@@ -1137,6 +1221,24 @@ void step_viewer::ui()
             ImGui::SetItemTooltip("Show only the selection (I)");
             ImGui::EndDisabled();
             ImGui::SameLine();
+            bool anything_hidden = false;
+            if(model != nullptr) {
+                for(step_node const &node : model->nodes) {
+                    if(!node.visible) {
+                        anything_hidden = true;
+                        break;
+                    }
+                }
+            }
+            ImGui::BeginDisabled(!anything_hidden);
+            if(ImGui::Button("Show all " MATSYM_visibility)) {
+                model->show_all();
+                isolated = false;
+                set_active();
+            }
+            ImGui::SetItemTooltip("Make everything visible again");
+            ImGui::EndDisabled();
+            ImGui::SameLine();
             ImGui::Checkbox("Edges", &settings.show_edges);
             ImGui::SetItemTooltip("Show edges (E)");
             ImGui::SameLine();
@@ -1145,6 +1247,12 @@ void step_viewer::ui()
             ImGui::SameLine();
             ImGui::Checkbox("Axes", &settings.show_axes);
             ImGui::SetItemTooltip("Show the X, Y and Z axes (X)");
+            ImGui::SameLine();
+            SegmentedControl("##projection", &settings.orthographic, "Persp", "Ortho");
+            ImGui::SetItemTooltip("Perspective or orthographic projection");
+            ImGui::SameLine();
+            SegmentedControl("##rotation", &settings.trackball, "Turntable", "Free");
+            ImGui::SetItemTooltip("Turntable (Z stays up) or free (trackball) rotation");
 
             if(loading && !settings.view_info) {
                 std::string text = loading_text();

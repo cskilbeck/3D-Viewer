@@ -119,6 +119,15 @@ struct step_viewer : gpu_window
     // fit the selection (or everything if nothing's selected) in the view
     void fit_to_view();
 
+    // look along an axis (0, 1, 2 = X, Y, Z) at the selection (or everything), from the
+    // positive side first, again (with no camera movement in between) from the other side
+    void axis_view(int axis);
+    int last_axis_view{ -1 };
+    bool last_axis_view_positive{ false };
+    gpu::vec3 last_axis_view_target{};
+    gpu::vec3 last_axis_view_forward{};
+    float last_axis_view_distance{};
+
     // isometric, whole model
     void reset_view();
 

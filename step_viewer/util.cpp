@@ -313,6 +313,57 @@ void RightAlignButtons(const std::vector<const char *> &labels)
 
 //////////////////////////////////////////////////////////////////////
 
+bool SegmentedControl(char const *label, int *value, std::vector<char const *> const &options)
+{
+    bool changed = false;
+    ImGui::PushID(label);
+    ImGui::BeginGroup();
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(1.0f, ImGui::GetStyle().ItemSpacing.y));
+    for(int i = 0; i < (int)options.size(); ++i) {
+        if(i != 0) {
+            ImGui::SameLine();
+        }
+        bool selected = *value == i;
+        if(selected) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_FrameBg));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        }
+        if(ImGui::Button(options[i]) && !selected) {
+            *value = i;
+            changed = true;
+        }
+        ImGui::PopStyleColor(2);
+    }
+    ImGui::PopStyleVar();
+    ImGui::EndGroup();
+
+    // the label, the same way other widgets do it
+    char const *label_end = ImGui::FindRenderedTextEnd(label);
+    if(label_end != label) {
+        ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+        ImGui::TextUnformatted(label, label_end);
+    }
+    ImGui::PopID();
+    return changed;
+}
+
+//////////////////////////////////////////////////////////////////////
+
+bool SegmentedControl(char const *label, bool *value, char const *off_option, char const *on_option)
+{
+    int index = *value ? 1 : 0;
+    if(SegmentedControl(label, &index, { off_option, on_option })) {
+        *value = index == 1;
+        return true;
+    }
+    return false;
+}
+
+//////////////////////////////////////////////////////////////////////
+
 int MsgBox(char const *banner, char const *text, char const *yes_text, char const *no_text)
 {
     int rc = 0;

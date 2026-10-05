@@ -66,6 +66,26 @@ void camera::set_isometric()
 
 //////////////////////////////////////////////////////////////////////
 
+void camera::look_along(gpu::vec3 const &direction, gpu::vec3 const &up_hint)
+{
+    forward = gpu::normalize(direction);
+    gpu::vec3 right = gpu::cross(forward, up_hint);
+    up = gpu::normalize(gpu::cross(gpu::normalize(right), forward));
+
+    if(!trackball && std::abs(forward.z) > std::sin(max_pitch)) {
+        // tip it towards the up hint by the smallest amount turntable allows
+        float pitch = forward.z < 0 ? max_pitch : -max_pitch;
+        float yaw = std::atan2(-up_hint.y, -up_hint.x);
+        if(forward.z > 0) {
+            yaw += pi;    // looking up from underneath, tip the other way so up_hint is up
+        }
+        forward = forward_from(yaw, pitch);
+        up = level_up(forward, up_hint);
+    }
+}
+
+//////////////////////////////////////////////////////////////////////
+
 void camera::level()
 {
     // turntable can't look straight up/down
