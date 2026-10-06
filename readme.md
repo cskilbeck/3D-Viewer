@@ -64,6 +64,8 @@ Everything is converted to millimeters with Z up. Formats with units (glTF, FBX,
 
 Files with real materials (glTF, or anything with textures) are always shaded realistically: base color, metallic/roughness, normal, occlusion and emissive textures, and opaque/mask/blend alpha. For files which just have colors (STEP etc) it's a choice on the toolbar or in the settings: `[CAD|Realistic]`, where realistic shading treats every color as a slightly rough plastic.
 
+Settings > Transparency picks how transparent surfaces are put in order: **None** sorts whole parts (fastest, wrong where parts overlap), **Basic** sorts every triangle (mostly right) and **Advanced** uses depth peeling, which is exactly right up to a number of layers (8 by default) but slower. Advanced needs a GPU which can sample depth textures and render to float targets, otherwise it falls back to Basic.
+
 Mesh formats have no CAD edges, so the sharp ones (where the surface bends by more than 35 degrees, and open boundaries) are drawn instead. If the file has no normals, they're smoothed only across angles under 35 degrees so sharp edges stay sharp.
 
 ## Controls

@@ -52,6 +52,7 @@ Everything's in meters (as glTF is) and Y up, so it gets scaled and turned.
 | `gltf/normal_map.glb` | normal map | a 40 mm metal plate with 4 x 4 round dimples |
 | `gltf/emissive.glb` | emissive color and `KHR_materials_emissive_strength` | a glowing orange cube next to a plain red one |
 | `gltf/hierarchy.glb` | node tree, one mesh used several times | five textured cubes: plain, turned 45 degrees, mirrored (F backwards), stretched (twice as tall, half as deep), and one nested three nodes deep |
+| `gltf/transparency.glb` | transparency ordering (Settings > Transparency) | three see-through planes (red, green, blue) through each other and an opaque box poking through them. With None the blue plane covers parts of the others which are in front of it, Basic and Advanced get it right |
 | `gltf/far_from_origin.glb` | precision a long way from the origin | a red 10 mm cube a kilometer away |
 
 ## Other mesh formats

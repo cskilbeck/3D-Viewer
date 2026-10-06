@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstring>
 #include <format>
 #include <utility>
 
@@ -30,6 +31,11 @@ namespace
         float eye[4];    // w = exposure
         float emissive[4];
         float params[4];
+    };
+
+    struct peel_uniforms
+    {
+        float layer[4];    // x = 1 for the first layer
     };
 
     float const edge_color[4] = { 0.08f, 0.08f, 0.08f, 1.0f };
@@ -68,18 +74,20 @@ namespace
     }
 
     //////////////////////////////////////////////////////////////////////
-    // draw(first, count) for everything in 0..total except the hidden parts' ranges,
+    // draw(first, count) for everything in start..total except the hidden parts' ranges,
     // so it's one draw when nothing's hidden. range(part) gets a part's {first, count},
     // parts are in order so the ranges are too. Anything which isn't in a part is drawn
 
     template <typename range_fn, typename draw_fn>
-    void draw_visible(uint32_t total, std::vector<step_part> const *parts, range_fn range, draw_fn draw)
+    void draw_visible(uint32_t start, uint32_t total, std::vector<step_part> const *parts, range_fn range, draw_fn draw)
     {
-        uint32_t start = 0;
         if(parts != nullptr) {
             for(step_part const &part : *parts) {
                 if(!part.visible) {
                     auto [first, count] = range(part);
+                    if(count == 0) {
+                        continue;
+                    }
                     if(first > start) {
                         draw(start, first - start);
                     }
@@ -90,6 +98,29 @@ namespace
         if(total > start) {
             draw(start, total - start);
         }
+    }
+
+    //////////////////////////////////////////////////////////////////////
+
+    bool is_selected(model_renderer::draw_params const &params, int part_index)
+    {
+        return params.selected_parts != nullptr &&
+               std::find(params.selected_parts->begin(), params.selected_parts->end(), part_index) != params.selected_parts->end();
+    }
+
+    //////////////////////////////////////////////////////////////////////
+
+    SDL_GPUColorTargetBlendState blend_state(SDL_GPUBlendFactor src, SDL_GPUBlendFactor dst)
+    {
+        SDL_GPUColorTargetBlendState blend{};
+        blend.enable_blend = true;
+        blend.src_color_blendfactor = src;
+        blend.dst_color_blendfactor = dst;
+        blend.color_blend_op = SDL_GPU_BLENDOP_ADD;
+        blend.src_alpha_blendfactor = src;
+        blend.dst_alpha_blendfactor = dst;
+        blend.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+        return blend;
     }
 
 }    // namespace
@@ -110,7 +141,11 @@ bool model_renderer::init(gpu::device &device, SDL_GPUTextureFormat swapchain_fo
 
     sample_count = best_sample_count(gpu, color_format, depth_format);
 
-    LOG_INFO("Render targets: {} samples, depth format {}", 1 << (int)sample_count, (int)depth_format);
+    peel_supported =
+        SDL_GPUTextureSupportsFormat(gpu, peel_depth_format, SDL_GPU_TEXTURETYPE_2D, SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER) &&
+        SDL_GPUTextureSupportsFormat(gpu, layers_format, SDL_GPU_TEXTURETYPE_2D, SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
+
+    LOG_INFO("Render targets: {} samples, depth format {}, depth peeling {}", 1 << (int)sample_count, (int)depth_format, peel_supported ? "yes" : "no");
 
     SDL_GPUShader *mesh_vert = dev->load_shader("mesh.vert", SDL_GPU_SHADERSTAGE_VERTEX, 1);
     SDL_GPUShader *mesh_frag = dev->load_shader("mesh.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
@@ -120,8 +155,16 @@ bool model_renderer::init(gpu::device &device, SDL_GPUTextureFormat swapchain_fo
     SDL_GPUShader *grid_frag = dev->load_shader("grid.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
     SDL_GPUShader *pbr_vert = dev->load_shader("pbr.vert", SDL_GPU_SHADERSTAGE_VERTEX, 1);
     SDL_GPUShader *pbr_frag = dev->load_shader("pbr.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 1, num_material_textures);
+    SDL_GPUShader *fullscreen_vert = dev->load_shader("fullscreen.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0);
+    SDL_GPUShader *depth_only_frag = dev->load_shader("depth_only.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 0);
+    SDL_GPUShader *peel_depth_frag = dev->load_shader("peel_depth.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 2);
+    SDL_GPUShader *composite_frag = dev->load_shader("composite.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 0, 1);
 
     bool ok = mesh_vert && mesh_frag && edge_vert && edge_frag && grid_vert && grid_frag && pbr_vert && pbr_frag;
+    bool peel_shaders = fullscreen_vert && depth_only_frag && peel_depth_frag && composite_frag;
+    if(!peel_shaders) {
+        peel_supported = false;
+    }
 
     SDL_GPUColorTargetDescription color_target{};
     color_target.format = color_format;
@@ -137,9 +180,23 @@ bool model_renderer::init(gpu::device &device, SDL_GPUTextureFormat swapchain_fo
 
     // shaded triangles - pushed back a bit so the edges drawn on top win the depth test
     // (depth is reversed so further away is smaller, hence the negative bias)
-    // transparent ones are blended, don't write depth and are drawn back faces then front faces
+    // transparent ones are blended (premultiplied alpha) and don't write depth
 
-    auto create_mesh_pipeline = [&](char const *name, SDL_GPUCullMode cull_mode, bool transparent, bool pbr) -> SDL_GPUGraphicsPipeline * {
+    struct mesh_pipeline_info
+    {
+        char const *name;
+        bool pbr;                                  // vertex layout and shaders
+        SDL_GPUShader *fragment_shader;            // or null for the CAD/PBR one
+        SDL_GPUCullMode cull_mode;
+        SDL_GPUColorTargetDescription const *color;    // null for depth only
+        SDL_GPUTextureFormat depth;
+        SDL_GPUSampleCount samples;
+        SDL_GPUCompareOp compare;
+        bool write_depth;
+        bool depth_bias;
+    };
+
+    auto create_mesh_pipeline = [&](mesh_pipeline_info const &info) -> SDL_GPUGraphicsPipeline * {
         SDL_GPUVertexBufferDescription buffer{};
         buffer.slot = 0;
         buffer.pitch = sizeof(mesh_vertex);
@@ -154,62 +211,117 @@ bool model_renderer::init(gpu::device &device, SDL_GPUTextureFormat swapchain_fo
         };
         add_attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, offsetof(mesh_vertex, position));
         add_attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, offsetof(mesh_vertex, normal));
-        if(pbr) {
+        if(info.pbr) {
             add_attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(mesh_vertex, uv));
         }
         add_attribute(SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM, offsetof(mesh_vertex, color));
 
         SDL_GPUGraphicsPipelineCreateInfo ci{};
-        ci.vertex_shader = pbr ? pbr_vert : mesh_vert;
-        ci.fragment_shader = pbr ? pbr_frag : mesh_frag;
+        ci.vertex_shader = info.pbr ? pbr_vert : mesh_vert;
+        ci.fragment_shader = info.fragment_shader != nullptr ? info.fragment_shader : (info.pbr ? pbr_frag : mesh_frag);
         ci.vertex_input_state.vertex_buffer_descriptions = &buffer;
         ci.vertex_input_state.num_vertex_buffers = 1;
         ci.vertex_input_state.vertex_attributes = attributes;
         ci.vertex_input_state.num_vertex_attributes = num_attributes;
         ci.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
         ci.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
-        ci.rasterizer_state.cull_mode = cull_mode;
+        ci.rasterizer_state.cull_mode = info.cull_mode;
         ci.rasterizer_state.front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
-        ci.rasterizer_state.enable_depth_bias = true;
-        ci.rasterizer_state.depth_bias_constant_factor = -2.0f;
-        ci.rasterizer_state.depth_bias_slope_factor = -1.5f;
+        ci.rasterizer_state.enable_depth_bias = info.depth_bias;
+        ci.rasterizer_state.depth_bias_constant_factor = info.depth_bias ? -2.0f : 0.0f;
+        ci.rasterizer_state.depth_bias_slope_factor = info.depth_bias ? -1.5f : 0.0f;
         ci.depth_stencil_state.enable_depth_test = true;
-        ci.depth_stencil_state.enable_depth_write = !transparent;
-        ci.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_GREATER_OR_EQUAL;    // selected parts get drawn twice
-        ci.multisample_state = multisample;
-
-        SDL_GPUColorTargetDescription blended_target = color_target;
-        if(transparent) {
-            SDL_GPUColorTargetBlendState &blend = blended_target.blend_state;
-            blend.enable_blend = true;
-            blend.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
-            blend.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
-            blend.color_blend_op = SDL_GPU_BLENDOP_ADD;
-            blend.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
-            blend.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
-            blend.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
-        }
-        ci.target_info = target_info;
-        ci.target_info.color_target_descriptions = &blended_target;
+        ci.depth_stencil_state.enable_depth_write = info.write_depth;
+        ci.depth_stencil_state.compare_op = info.compare;
+        ci.multisample_state.sample_count = info.samples;
+        ci.target_info.color_target_descriptions = info.color;
+        ci.target_info.num_color_targets = info.color != nullptr ? 1 : 0;
+        ci.target_info.depth_stencil_format = info.depth;
+        ci.target_info.has_depth_stencil_target = true;
 
         SDL_GPUGraphicsPipeline *pipeline = SDL_CreateGPUGraphicsPipeline(gpu, &ci);
         if(pipeline == nullptr) {
-            LOG_ERROR("Can't create {} pipeline: {}", name, SDL_GetError());
-            ok = false;
+            LOG_ERROR("Can't create {} pipeline: {}", info.name, SDL_GetError());
         }
         return pipeline;
     };
 
     if(ok) {
-        mesh_pipeline = create_mesh_pipeline("mesh", SDL_GPU_CULLMODE_NONE, false, false);
-        transparent_back_pipeline = create_mesh_pipeline("transparent back", SDL_GPU_CULLMODE_FRONT, true, false);
-        transparent_front_pipeline = create_mesh_pipeline("transparent front", SDL_GPU_CULLMODE_BACK, true, false);
-        pbr_pipeline = create_mesh_pipeline("pbr", SDL_GPU_CULLMODE_NONE, false, true);
-        pbr_transparent_back_pipeline = create_mesh_pipeline("pbr transparent back", SDL_GPU_CULLMODE_FRONT, true, true);
-        pbr_transparent_front_pipeline = create_mesh_pipeline("pbr transparent front", SDL_GPU_CULLMODE_BACK, true, true);
+        // premultiplied alpha "over"
+        SDL_GPUColorTargetDescription blended = color_target;
+        blended.blend_state = blend_state(SDL_GPU_BLENDFACTOR_ONE, SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA);
+
+        SDL_GPUCompareOp const greater_equal = SDL_GPU_COMPAREOP_GREATER_OR_EQUAL;    // selected parts get drawn twice
+
+        for(bool pbr : { false, true }) {
+            auto make = [&](char const *name, SDL_GPUCullMode cull, bool transparent) {
+                return create_mesh_pipeline({ name, pbr, nullptr, cull, transparent ? &blended : &color_target, depth_format, sample_count, greater_equal,
+                                              !transparent, true });
+            };
+            (pbr ? pbr_pipeline : mesh_pipeline) = make("mesh", SDL_GPU_CULLMODE_NONE, false);
+            (pbr ? pbr_transparent_back_pipeline : transparent_back_pipeline) = make("transparent back", SDL_GPU_CULLMODE_FRONT, true);
+            (pbr ? pbr_transparent_front_pipeline : transparent_front_pipeline) = make("transparent front", SDL_GPU_CULLMODE_BACK, true);
+            (pbr ? pbr_transparent_both_pipeline : transparent_both_pipeline) = make("transparent", SDL_GPU_CULLMODE_NONE, true);
+        }
+        for(SDL_GPUGraphicsPipeline *pipeline : { mesh_pipeline,
+                                                   transparent_back_pipeline,
+                                                   transparent_front_pipeline,
+                                                   transparent_both_pipeline,
+                                                   pbr_pipeline,
+                                                   pbr_transparent_back_pipeline,
+                                                   pbr_transparent_front_pipeline,
+                                                   pbr_transparent_both_pipeline }) {
+            ok = ok && pipeline != nullptr;
+        }
     }
 
-    // textures for materials which don't have them, and the sampler they all use
+    // depth peeling, without MSAA
+
+    if(ok && peel_supported) {
+        // the next layer goes under the ones so far (front to back): dst += (1 - dst.a) * src (premultiplied)
+        SDL_GPUColorTargetDescription under{};
+        under.format = layers_format;
+        under.blend_state = blend_state(SDL_GPU_BLENDFACTOR_ONE_MINUS_DST_ALPHA, SDL_GPU_BLENDFACTOR_ONE);
+
+        // the opaque depth is pushed back like the MSAA one so transparent surfaces lying on opaque ones win
+        opaque_depth_pipeline = create_mesh_pipeline({ "opaque depth", false, depth_only_frag, SDL_GPU_CULLMODE_NONE, nullptr, peel_depth_format,
+                                                       SDL_GPU_SAMPLECOUNT_1, SDL_GPU_COMPAREOP_GREATER_OR_EQUAL, true, true });
+
+        // depth and color of each layer use the same vertex shader so the depths are exactly equal
+        for(bool pbr : { false, true }) {
+            (pbr ? pbr_peel_depth_pipeline : peel_depth_pipeline) = create_mesh_pipeline(
+                { "peel depth", pbr, peel_depth_frag, SDL_GPU_CULLMODE_NONE, nullptr, peel_depth_format, SDL_GPU_SAMPLECOUNT_1, SDL_GPU_COMPAREOP_GREATER, true, false });
+            (pbr ? pbr_peel_color_pipeline : peel_color_pipeline) = create_mesh_pipeline(
+                { "peel color", pbr, nullptr, SDL_GPU_CULLMODE_NONE, &under, peel_depth_format, SDL_GPU_SAMPLECOUNT_1, SDL_GPU_COMPAREOP_EQUAL, false, false });
+        }
+
+        // the layers over the opaque image
+        SDL_GPUColorTargetDescription over = color_target;
+        over.blend_state = blend_state(SDL_GPU_BLENDFACTOR_ONE, SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA);
+
+        SDL_GPUGraphicsPipelineCreateInfo ci{};
+        ci.vertex_shader = fullscreen_vert;
+        ci.fragment_shader = composite_frag;
+        ci.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+        ci.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+        ci.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+        ci.target_info.color_target_descriptions = &over;
+        ci.target_info.num_color_targets = 1;
+        composite_pipeline = SDL_CreateGPUGraphicsPipeline(gpu, &ci);
+        if(composite_pipeline == nullptr) {
+            LOG_ERROR("Can't create composite pipeline: {}", SDL_GetError());
+        }
+
+        for(SDL_GPUGraphicsPipeline *pipeline :
+            { opaque_depth_pipeline, peel_depth_pipeline, pbr_peel_depth_pipeline, peel_color_pipeline, pbr_peel_color_pipeline, composite_pipeline }) {
+            peel_supported = peel_supported && pipeline != nullptr;
+        }
+        if(!peel_supported) {
+            LOG_WARNING("Depth peeling isn't available");
+        }
+    }
+
+    // textures for materials which don't have them, and the samplers
 
     if(ok) {
         uint8_t const white[4] = { 255, 255, 255, 255 };
@@ -230,8 +342,17 @@ bool model_renderer::init(gpu::device &device, SDL_GPUTextureFormat swapchain_fo
         sci.max_lod = 1000;
         sampler = SDL_CreateGPUSampler(gpu, &sci);
 
-        if(white_texture == nullptr || flat_normal_texture == nullptr || sampler == nullptr) {
-            LOG_ERROR("Can't create default textures/sampler: {}", SDL_GetError());
+        SDL_GPUSamplerCreateInfo pci{};
+        pci.min_filter = SDL_GPU_FILTER_NEAREST;
+        pci.mag_filter = SDL_GPU_FILTER_NEAREST;
+        pci.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+        pci.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        pci.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        pci.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        point_sampler = SDL_CreateGPUSampler(gpu, &pci);
+
+        if(white_texture == nullptr || flat_normal_texture == nullptr || sampler == nullptr || point_sampler == nullptr) {
+            LOG_ERROR("Can't create default textures/samplers: {}", SDL_GetError());
             ok = false;
         }
     }
@@ -281,13 +402,8 @@ bool model_renderer::init(gpu::device &device, SDL_GPUTextureFormat swapchain_fo
 
         SDL_GPUColorTargetDescription blended_target = color_target;
         SDL_GPUColorTargetBlendState &blend = blended_target.blend_state;
-        blend.enable_blend = true;
-        blend.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
-        blend.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
-        blend.color_blend_op = SDL_GPU_BLENDOP_ADD;
+        blend = blend_state(SDL_GPU_BLENDFACTOR_SRC_ALPHA, SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA);
         blend.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
-        blend.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
-        blend.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
 
         SDL_GPUGraphicsPipelineCreateInfo ci{};
         ci.vertex_shader = grid_vert;
@@ -317,7 +433,18 @@ bool model_renderer::init(gpu::device &device, SDL_GPUTextureFormat swapchain_fo
     }
 
     // pipelines keep what they need from the shaders
-    for(SDL_GPUShader *shader : { mesh_vert, mesh_frag, edge_vert, edge_frag, grid_vert, grid_frag, pbr_vert, pbr_frag }) {
+    for(SDL_GPUShader *shader : { mesh_vert,
+                                  mesh_frag,
+                                  edge_vert,
+                                  edge_frag,
+                                  grid_vert,
+                                  grid_frag,
+                                  pbr_vert,
+                                  pbr_frag,
+                                  fullscreen_vert,
+                                  depth_only_frag,
+                                  peel_depth_frag,
+                                  composite_frag }) {
         if(shader != nullptr) {
             SDL_ReleaseGPUShader(gpu, shader);
         }
@@ -335,6 +462,7 @@ void model_renderer::cleanup()
     }
     clear_model();
     release_targets();
+    release_peel_targets();
     if(grid_buffer != nullptr) {
         SDL_ReleaseGPUBuffer(dev->gpu, grid_buffer);
         grid_buffer = nullptr;
@@ -342,18 +470,23 @@ void model_renderer::cleanup()
     for(SDL_GPUGraphicsPipeline **pipeline : { &mesh_pipeline,
                                                 &transparent_back_pipeline,
                                                 &transparent_front_pipeline,
+                                                &transparent_both_pipeline,
                                                 &pbr_pipeline,
                                                 &pbr_transparent_back_pipeline,
                                                 &pbr_transparent_front_pipeline,
-                                                &grid_pipeline }) {
+                                                &pbr_transparent_both_pipeline,
+                                                &edge_pipeline,
+                                                &grid_pipeline,
+                                                &opaque_depth_pipeline,
+                                                &peel_depth_pipeline,
+                                                &pbr_peel_depth_pipeline,
+                                                &peel_color_pipeline,
+                                                &pbr_peel_color_pipeline,
+                                                &composite_pipeline }) {
         if(*pipeline != nullptr) {
             SDL_ReleaseGPUGraphicsPipeline(dev->gpu, *pipeline);
             *pipeline = nullptr;
         }
-    }
-    if(edge_pipeline != nullptr) {
-        SDL_ReleaseGPUGraphicsPipeline(dev->gpu, edge_pipeline);
-        edge_pipeline = nullptr;
     }
     for(SDL_GPUTexture **texture : { &white_texture, &flat_normal_texture }) {
         if(*texture != nullptr) {
@@ -361,9 +494,11 @@ void model_renderer::cleanup()
             *texture = nullptr;
         }
     }
-    if(sampler != nullptr) {
-        SDL_ReleaseGPUSampler(dev->gpu, sampler);
-        sampler = nullptr;
+    for(SDL_GPUSampler **s : { &sampler, &point_sampler }) {
+        if(*s != nullptr) {
+            SDL_ReleaseGPUSampler(dev->gpu, *s);
+            *s = nullptr;
+        }
     }
     dev = nullptr;
 }
@@ -441,6 +576,29 @@ void model_renderer::set_model(step_model const &model, texture_set &&model_text
     batches = model.batches;
     num_opaque_batches = model.num_opaque_batches;
 
+    // the transparent triangles, for sorting
+    for(uint32_t b = num_opaque_batches; b < (uint32_t)batches.size(); ++b) {
+        step_batch const &batch = batches[b];
+        for(uint32_t i = batch.first_index; i + 2 < batch.first_index + batch.num_indices; i += 3) {
+            float const *p[3] = { model.vertices[model.indices[i]].position, model.vertices[model.indices[i + 1]].position,
+                                  model.vertices[model.indices[i + 2]].position };
+            gpu::vec3 middle{ (p[0][0] + p[1][0] + p[2][0]) / 3, (p[0][1] + p[1][1] + p[2][1]) / 3, (p[0][2] + p[1][2] + p[2][2]) / 3 };
+            transparent_triangles.push_back({ middle, batch.part, batch.material });
+            transparent_indices.insert(transparent_indices.end(), &model.indices[i], &model.indices[i] + 3);
+        }
+    }
+    if(!transparent_indices.empty() && vertex_buffer != nullptr) {
+        uint32_t size = (uint32_t)(transparent_indices.size() * sizeof(uint32_t));
+        sorted_index_buffer = dev->create_buffer(SDL_GPU_BUFFERUSAGE_INDEX, transparent_indices.data(), size, "sorted transparent indices");
+        SDL_GPUTransferBufferCreateInfo tci{};
+        tci.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+        tci.size = size;
+        sorted_transfer_buffer = SDL_CreateGPUTransferBuffer(dev->gpu, &tci);
+        if(sorted_index_buffer == nullptr || sorted_transfer_buffer == nullptr) {
+            LOG_ERROR("Can't create sorted transparency buffers: {}", SDL_GetError());
+        }
+    }
+
     // already uploaded (or any which weren't, here)
     textures = std::move(model_textures.textures);
     model_textures.textures.clear();
@@ -496,7 +654,7 @@ void model_renderer::set_model(step_model const &model, texture_set &&model_text
 
 void model_renderer::clear_model()
 {
-    for(SDL_GPUBuffer **buffer : { &vertex_buffer, &index_buffer, &edge_buffer, &axes_buffer }) {
+    for(SDL_GPUBuffer **buffer : { &vertex_buffer, &index_buffer, &edge_buffer, &axes_buffer, &sorted_index_buffer }) {
         if(*buffer != nullptr) {
             SDL_ReleaseGPUBuffer(dev->gpu, *buffer);
             *buffer = nullptr;
@@ -515,6 +673,16 @@ void model_renderer::clear_model()
     materials.clear();
     batches.clear();
     num_opaque_batches = 0;
+
+    if(sorted_transfer_buffer != nullptr) {
+        SDL_ReleaseGPUTransferBuffer(dev->gpu, sorted_transfer_buffer);
+        sorted_transfer_buffer = nullptr;
+    }
+    transparent_triangles.clear();
+    transparent_indices.clear();
+    sorted_indices.clear();
+    sorted_runs.clear();
+    sorted_valid = false;
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -567,6 +735,328 @@ void model_renderer::release_targets()
 
 //////////////////////////////////////////////////////////////////////
 
+void model_renderer::create_peel_targets(uint32_t width, uint32_t height)
+{
+    release_peel_targets();
+
+    SDL_GPUTextureCreateInfo ci{};
+    ci.type = SDL_GPU_TEXTURETYPE_2D;
+    ci.width = width;
+    ci.height = height;
+    ci.layer_count_or_depth = 1;
+    ci.num_levels = 1;
+    ci.sample_count = SDL_GPU_SAMPLECOUNT_1;
+
+    ci.format = peel_depth_format;
+    ci.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    for(SDL_GPUTexture **texture : { &opaque_depth_texture, &peel_depth_textures[0], &peel_depth_textures[1] }) {
+        *texture = SDL_CreateGPUTexture(dev->gpu, &ci);
+    }
+
+    ci.format = layers_format;
+    ci.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    layers_texture = SDL_CreateGPUTexture(dev->gpu, &ci);
+
+    if(opaque_depth_texture == nullptr || peel_depth_textures[0] == nullptr || peel_depth_textures[1] == nullptr || layers_texture == nullptr) {
+        LOG_ERROR("Can't create depth peeling targets: {}", SDL_GetError());
+        release_peel_targets();
+        return;
+    }
+    peel_width = width;
+    peel_height = height;
+}
+
+//////////////////////////////////////////////////////////////////////
+
+void model_renderer::release_peel_targets()
+{
+    for(SDL_GPUTexture **texture : { &opaque_depth_texture, &peel_depth_textures[0], &peel_depth_textures[1], &layers_texture }) {
+        if(*texture != nullptr) {
+            SDL_ReleaseGPUTexture(dev->gpu, *texture);
+            *texture = nullptr;
+        }
+    }
+    peel_width = 0;
+    peel_height = 0;
+}
+
+//////////////////////////////////////////////////////////////////////
+// realistic shading: a material's textures and settings, tinted if it's selected
+
+void model_renderer::bind_material(SDL_GPUCommandBuffer *cmd, SDL_GPURenderPass *pass, draw_params const &params, int material_index, float const *tint) const
+{
+    gpu_material const &material = materials[material_index];
+    pbr_fragment_uniforms u{};
+    std::copy(tint, tint + 4, u.tint);
+    u.eye[0] = params.eye.x;
+    u.eye[1] = params.eye.y;
+    u.eye[2] = params.eye.z;
+    u.eye[3] = params.exposure;
+    std::copy(material.emissive, material.emissive + 4, u.emissive);
+    std::copy(material.params, material.params + 4, u.params);
+    SDL_PushGPUFragmentUniformData(cmd, 0, &u, sizeof(u));
+    SDL_GPUTextureSamplerBinding bindings[num_material_textures];
+    for(int i = 0; i < num_material_textures; ++i) {
+        bindings[i] = { material.textures[i], sampler };
+    }
+    SDL_BindGPUFragmentSamplers(pass, 0, bindings, num_material_textures);
+}
+
+//////////////////////////////////////////////////////////////////////
+// Sort the visible transparent triangles furthest first (when the view or what's
+// visible/selected changes) and upload them. Consecutive ones which look the same
+// (material, selected) are drawn together
+
+void model_renderer::update_sorted(SDL_GPUCommandBuffer *cmd, draw_params const &params, bool realistic)
+{
+    std::vector<step_part> const &parts = *params.parts;
+
+    // what's visible/selected and how it's shaded, so it only gets sorted again when something changes
+    uint64_t signature = 1469598103934665603ull;
+    auto mix = [&](uint64_t v) { signature = (signature ^ v) * 1099511628211ull; };
+    for(step_part const &part : parts) {
+        mix(part.visible ? 1 : 0);
+    }
+    if(params.selected_parts != nullptr) {
+        for(int part : *params.selected_parts) {
+            mix((uint64_t)part + 2);
+        }
+    }
+    mix(realistic ? 7 : 11);
+
+    if(sorted_valid && signature == sorted_signature && sorted_eye.x == params.eye.x && sorted_eye.y == params.eye.y && sorted_eye.z == params.eye.z) {
+        return;
+    }
+    sorted_valid = true;
+    sorted_signature = signature;
+    sorted_eye = params.eye;
+
+    std::vector<char> selected(parts.size(), 0);
+    if(params.selected_parts != nullptr) {
+        for(int part : *params.selected_parts) {
+            selected[part] = 1;
+        }
+    }
+
+    std::vector<std::pair<float, uint32_t>> order;
+    order.reserve(transparent_triangles.size());
+    for(uint32_t i = 0; i < (uint32_t)transparent_triangles.size(); ++i) {
+        transparent_triangle const &triangle = transparent_triangles[i];
+        if(parts[triangle.part].visible) {
+            gpu::vec3 d = triangle.middle - params.eye;
+            order.emplace_back(d.x * d.x + d.y * d.y + d.z * d.z, i);
+        }
+    }
+    std::sort(order.begin(), order.end(), [](auto const &a, auto const &b) { return a.first > b.first; });
+
+    sorted_indices.clear();
+    sorted_runs.clear();
+    for(auto const &[distance, i] : order) {
+        transparent_triangle const &triangle = transparent_triangles[i];
+        int material = realistic ? triangle.material : 0;
+        bool is_selected_part = selected[triangle.part] != 0;
+        if(sorted_runs.empty() || sorted_runs.back().material != material || sorted_runs.back().selected != is_selected_part) {
+            sorted_runs.push_back({ (uint32_t)sorted_indices.size(), 0, material, is_selected_part });
+        }
+        sorted_indices.insert(sorted_indices.end(), &transparent_indices[i * 3], &transparent_indices[i * 3] + 3);
+        sorted_runs.back().num_indices += 3;
+    }
+
+    if(sorted_indices.empty()) {
+        return;
+    }
+
+    // cycle so the GPU can still be drawing with the old ones
+    uint32_t size = (uint32_t)(sorted_indices.size() * sizeof(uint32_t));
+    void *mapped = SDL_MapGPUTransferBuffer(dev->gpu, sorted_transfer_buffer, true);
+    memcpy(mapped, sorted_indices.data(), size);
+    SDL_UnmapGPUTransferBuffer(dev->gpu, sorted_transfer_buffer);
+
+    SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(cmd);
+    SDL_GPUTransferBufferLocation src{ sorted_transfer_buffer, 0 };
+    SDL_GPUBufferRegion dst{ sorted_index_buffer, 0, size };
+    SDL_UploadToGPUBuffer(copy, &src, &dst, true);
+    SDL_EndGPUCopyPass(copy);
+}
+
+//////////////////////////////////////////////////////////////////////
+
+void model_renderer::draw_sorted(SDL_GPUCommandBuffer *cmd, SDL_GPURenderPass *pass, draw_params const &params, bool realistic) const
+{
+    if(sorted_runs.empty()) {
+        return;
+    }
+    vertex_uniforms uniforms{ params.view, params.projection };
+    SDL_BindGPUGraphicsPipeline(pass, realistic ? pbr_transparent_both_pipeline : transparent_both_pipeline);
+    SDL_PushGPUVertexUniformData(cmd, 0, &uniforms, sizeof(uniforms));
+    SDL_GPUBufferBinding vertices{ vertex_buffer, 0 };
+    SDL_BindGPUVertexBuffers(pass, 0, &vertices, 1);
+    SDL_GPUBufferBinding indices{ sorted_index_buffer, 0 };
+    SDL_BindGPUIndexBuffer(pass, &indices, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+
+    float const no_tint[4]{};
+    for(sorted_run const &run : sorted_runs) {
+        float const *tint = run.selected ? params.selection_tint : no_tint;
+        if(realistic) {
+            bind_material(cmd, pass, params, run.material, tint);
+        } else {
+            color_uniforms color;
+            std::copy(tint, tint + 4, color.color);
+            SDL_PushGPUFragmentUniformData(cmd, 0, &color, sizeof(color));
+        }
+        SDL_DrawGPUIndexedPrimitives(pass, run.num_indices, 1, run.first_index, 0, 0);
+    }
+}
+
+//////////////////////////////////////////////////////////////////////
+// each visible part's transparent triangles, with its tint and materials (whichever pipeline is bound)
+
+void model_renderer::draw_transparent_parts(SDL_GPUCommandBuffer *cmd, SDL_GPURenderPass *pass, draw_params const &params, bool realistic) const
+{
+    float const no_tint[4]{};
+    for(int part_index = 0; part_index < (int)params.parts->size(); ++part_index) {
+        step_part const &part = (*params.parts)[part_index];
+        if(!part.visible || part.num_transparent_indices == 0) {
+            continue;
+        }
+        float const *tint = is_selected(params, part_index) ? params.selection_tint : no_tint;
+        if(realistic) {
+            for(uint32_t i = part.first_transparent_batch; i < part.first_transparent_batch + part.num_transparent_batches; ++i) {
+                bind_material(cmd, pass, params, batches[i].material, tint);
+                SDL_DrawGPUIndexedPrimitives(pass, batches[i].num_indices, 1, batches[i].first_index, 0, 0);
+            }
+        } else {
+            color_uniforms color;
+            std::copy(tint, tint + 4, color.color);
+            SDL_PushGPUFragmentUniformData(cmd, 0, &color, sizeof(color));
+            SDL_DrawGPUIndexedPrimitives(pass, part.num_transparent_indices, 1, part.first_transparent_index, 0, 0);
+        }
+    }
+}
+
+//////////////////////////////////////////////////////////////////////
+// Depth peeling: the transparent surfaces a layer at a time, front to back, into
+// layers_texture, which then goes over the opaque image (already in the swapchain)
+
+void model_renderer::render_peeled(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *swapchain_texture, draw_params const &params, bool realistic)
+{
+    if(peel_width != target_width || peel_height != target_height) {
+        create_peel_targets(target_width, target_height);
+    }
+    if(layers_texture == nullptr) {
+        return;
+    }
+
+    viewport_t const &viewport = params.viewport;
+    SDL_GPUViewport vp{ viewport.x, viewport.y, viewport.w, viewport.h, 0.0f, 1.0f };
+    SDL_Rect scissor{ (int)viewport.x, (int)viewport.y, (int)viewport.w, (int)viewport.h };
+    vertex_uniforms uniforms{ params.view, params.projection };
+    SDL_GPUBufferBinding vertices{ vertex_buffer, 0 };
+    SDL_GPUBufferBinding indices{ index_buffer, 0 };
+
+    auto begin = [&](SDL_GPUColorTargetInfo const *color, SDL_GPUDepthStencilTargetInfo const *depth) {
+        SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(cmd, color, color != nullptr ? 1 : 0, depth);
+        SDL_SetGPUViewport(pass, &vp);
+        SDL_SetGPUScissor(pass, &scissor);
+        return pass;
+    };
+
+    auto depth_target = [](SDL_GPUTexture *texture, bool clear) {
+        SDL_GPUDepthStencilTargetInfo depth{};
+        depth.texture = texture;
+        depth.clear_depth = 0.0f;    // reversed, 0 is far
+        depth.load_op = clear ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
+        depth.store_op = SDL_GPU_STOREOP_STORE;
+        depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
+        depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+        depth.cycle = clear;
+        return depth;
+    };
+
+    auto draw_transparent_ranges = [&](SDL_GPURenderPass *pass) {
+        draw_visible(
+            num_opaque_indices,
+            num_indices,
+            params.parts,
+            [](step_part const &part) { return std::pair{ part.first_transparent_index, part.num_transparent_indices }; },
+            [&](uint32_t first, uint32_t count) { SDL_DrawGPUIndexedPrimitives(pass, count, 1, first, 0, 0); });
+    };
+
+    // the opaque depth, without MSAA
+    {
+        SDL_GPUDepthStencilTargetInfo depth = depth_target(opaque_depth_texture, true);
+        SDL_GPURenderPass *pass = begin(nullptr, &depth);
+        SDL_BindGPUGraphicsPipeline(pass, opaque_depth_pipeline);
+        SDL_PushGPUVertexUniformData(cmd, 0, &uniforms, sizeof(uniforms));
+        SDL_BindGPUVertexBuffers(pass, 0, &vertices, 1);
+        SDL_BindGPUIndexBuffer(pass, &indices, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+        draw_visible(
+            0,
+            num_opaque_indices,
+            params.parts,
+            [](step_part const &part) { return std::pair{ part.first_index, part.num_indices }; },
+            [&](uint32_t first, uint32_t count) { SDL_DrawGPUIndexedPrimitives(pass, count, 1, first, 0, 0); });
+        SDL_EndGPURenderPass(pass);
+    }
+
+    int layers = std::clamp(params.peel_layers, 1, 32);
+    for(int layer = 0; layer < layers; ++layer) {
+
+        SDL_GPUTexture *layer_depth = peel_depth_textures[layer % 2];
+        SDL_GPUTexture *previous_depth = layer == 0 ? opaque_depth_texture : peel_depth_textures[(layer + 1) % 2];
+
+        // the nearest surfaces behind the previous layer
+        {
+            SDL_GPUDepthStencilTargetInfo depth = depth_target(layer_depth, true);
+            SDL_GPURenderPass *pass = begin(nullptr, &depth);
+            SDL_BindGPUGraphicsPipeline(pass, realistic ? pbr_peel_depth_pipeline : peel_depth_pipeline);
+            SDL_PushGPUVertexUniformData(cmd, 0, &uniforms, sizeof(uniforms));
+            peel_uniforms peel{ { layer == 0 ? 1.0f : 0.0f, 0, 0, 0 } };
+            SDL_PushGPUFragmentUniformData(cmd, 0, &peel, sizeof(peel));
+            SDL_GPUTextureSamplerBinding samplers[2] = { { previous_depth, point_sampler }, { opaque_depth_texture, point_sampler } };
+            SDL_BindGPUFragmentSamplers(pass, 0, samplers, 2);
+            SDL_BindGPUVertexBuffers(pass, 0, &vertices, 1);
+            SDL_BindGPUIndexBuffer(pass, &indices, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+            draw_transparent_ranges(pass);
+            SDL_EndGPURenderPass(pass);
+        }
+
+        // their color, under the layers so far
+        {
+            SDL_GPUColorTargetInfo color{};
+            color.texture = layers_texture;
+            color.clear_color = { 0, 0, 0, 0 };
+            color.load_op = layer == 0 ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
+            color.store_op = SDL_GPU_STOREOP_STORE;
+            color.cycle = layer == 0;
+            SDL_GPUDepthStencilTargetInfo depth = depth_target(layer_depth, false);
+            SDL_GPURenderPass *pass = begin(&color, &depth);
+            SDL_BindGPUGraphicsPipeline(pass, realistic ? pbr_peel_color_pipeline : peel_color_pipeline);
+            SDL_PushGPUVertexUniformData(cmd, 0, &uniforms, sizeof(uniforms));
+            SDL_BindGPUVertexBuffers(pass, 0, &vertices, 1);
+            SDL_BindGPUIndexBuffer(pass, &indices, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+            draw_transparent_parts(cmd, pass, params, realistic);
+            SDL_EndGPURenderPass(pass);
+        }
+    }
+
+    // over the opaque image
+    {
+        SDL_GPUColorTargetInfo color{};
+        color.texture = swapchain_texture;
+        color.load_op = SDL_GPU_LOADOP_LOAD;
+        color.store_op = SDL_GPU_STOREOP_STORE;
+        SDL_GPURenderPass *pass = begin(&color, nullptr);
+        SDL_BindGPUGraphicsPipeline(pass, composite_pipeline);
+        SDL_GPUTextureSamplerBinding binding{ layers_texture, point_sampler };
+        SDL_BindGPUFragmentSamplers(pass, 0, &binding, 1);
+        SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
+        SDL_EndGPURenderPass(pass);
+    }
+}
+
+//////////////////////////////////////////////////////////////////////
+
 void model_renderer::render(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *swapchain_texture, uint32_t width, uint32_t height, draw_params const &params)
 {
     viewport_t const &viewport = params.viewport;
@@ -574,6 +1064,24 @@ void model_renderer::render(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *swapchain
 
     if(width != target_width || height != target_height) {
         create_targets(width, height);
+    }
+
+    bool drawing = has_model() && depth_texture != nullptr && viewport.w >= 1 && viewport.h >= 1;
+    bool realistic = params.realistic && !materials.empty();
+
+    // how to do the transparent parts, if there are any
+    int transparency = transparency_none;
+    if(drawing && num_indices > num_opaque_indices && params.parts != nullptr) {
+        transparency = params.transparency;
+        if(transparency == transparency_peeled && !peel_supported) {
+            transparency = transparency_sorted;
+        }
+        if(transparency == transparency_sorted && (sorted_index_buffer == nullptr || sorted_transfer_buffer == nullptr)) {
+            transparency = transparency_none;
+        }
+    }
+    if(transparency == transparency_sorted) {
+        update_sorted(cmd, params, realistic);    // a copy pass, so before the render pass
     }
 
     bool msaa = msaa_texture != nullptr;
@@ -602,7 +1110,7 @@ void model_renderer::render(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *swapchain
 
     SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(cmd, &color, 1, depth_texture != nullptr ? &depth : nullptr);
 
-    if(has_model() && depth_texture != nullptr && viewport.w >= 1 && viewport.h >= 1) {
+    if(drawing) {
 
         SDL_GPUViewport vp{ viewport.x, viewport.y, viewport.w, viewport.h, 0.0f, 1.0f };
         SDL_SetGPUViewport(pass, &vp);
@@ -612,28 +1120,7 @@ void model_renderer::render(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *swapchain
 
         vertex_uniforms uniforms{ params.view, params.projection };
 
-        bool realistic = params.realistic && !materials.empty();
-
         auto is_visible = [&](int part_index) { return params.parts == nullptr || (*params.parts)[part_index].visible; };
-
-        // realistic shading: a material's textures and settings, tinted if it's selected
-        auto bind_material = [&](int material_index, float const *tint) {
-            gpu_material const &material = materials[material_index];
-            pbr_fragment_uniforms u{};
-            std::copy(tint, tint + 4, u.tint);
-            u.eye[0] = params.eye.x;
-            u.eye[1] = params.eye.y;
-            u.eye[2] = params.eye.z;
-            u.eye[3] = params.exposure;
-            std::copy(material.emissive, material.emissive + 4, u.emissive);
-            std::copy(material.params, material.params + 4, u.params);
-            SDL_PushGPUFragmentUniformData(cmd, 0, &u, sizeof(u));
-            SDL_GPUTextureSamplerBinding bindings[num_material_textures];
-            for(int i = 0; i < num_material_textures; ++i) {
-                bindings[i] = { material.textures[i], sampler };
-            }
-            SDL_BindGPUFragmentSamplers(pass, 0, bindings, num_material_textures);
-        };
 
         float const no_tint[4]{};
 
@@ -651,7 +1138,7 @@ void model_renderer::render(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *swapchain
             int run_material = 0;
             auto draw_run = [&]() {
                 if(run_count != 0) {
-                    bind_material(run_material, no_tint);
+                    bind_material(cmd, pass, params, run_material, no_tint);
                     SDL_DrawGPUIndexedPrimitives(pass, run_count, 1, run_first, 0, 0);
                     run_count = 0;
                 }
@@ -678,7 +1165,7 @@ void model_renderer::render(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *swapchain
                     step_part const &part = (*params.parts)[part_index];
                     if(part.visible) {
                         for(uint32_t i = part.first_batch; i < part.first_batch + part.num_batches; ++i) {
-                            bind_material(batches[i].material, params.selection_tint);
+                            bind_material(cmd, pass, params, batches[i].material, params.selection_tint);
                             SDL_DrawGPUIndexedPrimitives(pass, batches[i].num_indices, 1, batches[i].first_index, 0, 0);
                         }
                     }
@@ -695,6 +1182,7 @@ void model_renderer::render(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *swapchain
             color_uniforms untinted{};
             SDL_PushGPUFragmentUniformData(cmd, 0, &untinted, sizeof(untinted));
             draw_visible(
+                0,
                 num_opaque_indices,
                 params.parts,
                 [](step_part const &part) { return std::pair{ part.first_index, part.num_indices }; },
@@ -723,6 +1211,7 @@ void model_renderer::render(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *swapchain
             SDL_GPUBufferBinding vertices{ edge_buffer, 0 };
             SDL_BindGPUVertexBuffers(pass, 0, &vertices, 1);
             draw_visible(
+                0,
                 num_edge_vertices,
                 params.parts,
                 [](step_part const &part) { return std::pair{ part.first_edge_vertex, part.num_edge_vertices }; },
@@ -736,9 +1225,9 @@ void model_renderer::render(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *swapchain
             SDL_GPUBufferBinding vertices{ axes_buffer, 0 };
             SDL_BindGPUVertexBuffers(pass, 0, &vertices, 1);
             for(int axis = 0; axis < 3; ++axis) {
-                color_uniforms color;
-                std::copy(axis_colors[axis], axis_colors[axis] + 4, color.color);
-                SDL_PushGPUFragmentUniformData(cmd, 0, &color, sizeof(color));
+                color_uniforms axis_color;
+                std::copy(axis_colors[axis], axis_colors[axis] + 4, axis_color.color);
+                SDL_PushGPUFragmentUniformData(cmd, 0, &axis_color, sizeof(axis_color));
                 SDL_DrawGPUPrimitives(pass, 2, 1, axis * 2, 0);
             }
         }
@@ -759,36 +1248,32 @@ void model_renderer::render(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *swapchain
             SDL_DrawGPUPrimitives(pass, 4, 1, 0, 0);
         }
 
-        // transparent parts, furthest first
-        if(num_indices > num_opaque_indices && params.parts != nullptr) {
+        if(transparency == transparency_sorted) {
+            draw_sorted(cmd, pass, params, realistic);
+        } else if(transparency == transparency_none) {
+
+            // transparent parts, furthest first, each one back faces then front faces
             std::vector<std::pair<float, int>> order;
-            for(int i = 0; i < (int)params.parts->size(); ++i) {
-                step_part const &part = (*params.parts)[i];
-                if(part.visible && part.num_transparent_indices != 0) {
-                    gpu::vec3 middle = (part.bounds_min + part.bounds_max) * 0.5f;
-                    order.emplace_back((middle - params.eye).length(), i);
+            if(params.parts != nullptr) {
+                for(int i = 0; i < (int)params.parts->size(); ++i) {
+                    step_part const &part = (*params.parts)[i];
+                    if(part.visible && part.num_transparent_indices != 0) {
+                        gpu::vec3 middle = (part.bounds_min + part.bounds_max) * 0.5f;
+                        order.emplace_back((middle - params.eye).length(), i);
+                    }
                 }
             }
             std::sort(order.begin(), order.end(), [](auto const &a, auto const &b) { return a.first > b.first; });
 
-            auto is_selected = [&](int part_index) {
-                return params.selected_parts != nullptr &&
-                       std::find(params.selected_parts->begin(), params.selected_parts->end(), part_index) != params.selected_parts->end();
-            };
-
             SDL_GPUBufferBinding vertices{ vertex_buffer, 0 };
             SDL_GPUBufferBinding indices{ index_buffer, 0 };
-
-            color_uniforms untinted{};
-            color_uniforms tint;
-            std::copy(params.selection_tint, params.selection_tint + 4, tint.color);
 
             SDL_GPUGraphicsPipeline *back_pipeline = realistic ? pbr_transparent_back_pipeline : transparent_back_pipeline;
             SDL_GPUGraphicsPipeline *front_pipeline = realistic ? pbr_transparent_front_pipeline : transparent_front_pipeline;
 
             for(auto const &[distance, part_index] : order) {
                 step_part const &part = (*params.parts)[part_index];
-                bool selected = is_selected(part_index);
+                float const *tint = is_selected(params, part_index) ? params.selection_tint : no_tint;
                 for(SDL_GPUGraphicsPipeline *pipeline : { back_pipeline, front_pipeline }) {
                     SDL_BindGPUGraphicsPipeline(pass, pipeline);
                     SDL_PushGPUVertexUniformData(cmd, 0, &uniforms, sizeof(uniforms));
@@ -796,11 +1281,12 @@ void model_renderer::render(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *swapchain
                     SDL_BindGPUIndexBuffer(pass, &indices, SDL_GPU_INDEXELEMENTSIZE_32BIT);
                     if(realistic) {
                         for(uint32_t i = part.first_transparent_batch; i < part.first_transparent_batch + part.num_transparent_batches; ++i) {
-                            bind_material(batches[i].material, selected ? params.selection_tint : no_tint);
+                            bind_material(cmd, pass, params, batches[i].material, tint);
                             SDL_DrawGPUIndexedPrimitives(pass, batches[i].num_indices, 1, batches[i].first_index, 0, 0);
                         }
                     } else {
-                        color_uniforms const &part_tint = selected ? tint : untinted;
+                        color_uniforms part_tint;
+                        std::copy(tint, tint + 4, part_tint.color);
                         SDL_PushGPUFragmentUniformData(cmd, 0, &part_tint, sizeof(part_tint));
                         SDL_DrawGPUIndexedPrimitives(pass, part.num_transparent_indices, 1, part.first_transparent_index, 0, 0);
                     }
@@ -810,4 +1296,11 @@ void model_renderer::render(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *swapchain
     }
 
     SDL_EndGPURenderPass(pass);
+
+    if(transparency == transparency_peeled) {
+        bool any_visible = std::any_of(params.parts->begin(), params.parts->end(), [](step_part const &part) { return part.visible && part.num_transparent_indices != 0; });
+        if(any_visible) {
+            render_peeled(cmd, swapchain_texture, params, realistic);
+        }
+    }
 }

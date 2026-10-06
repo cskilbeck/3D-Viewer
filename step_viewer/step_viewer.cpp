@@ -968,6 +968,19 @@ void step_viewer::settings_ui()
         shading_control("Shading", "CAD", "Realistic");
         ImGui::SliderFloat("Exposure", &settings.exposure, 0.25f, 4.0f, "%.2f", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp);
         ImGui::SetItemTooltip("Brightness of realistic shading");
+        SegmentedControl("Transparency", &settings.transparency, { "None", "Basic", "Advanced" });
+        ImGui::SetItemTooltip("How transparent surfaces are put in order\n\n"
+                              "None: whole parts, furthest first (fastest, often wrong where parts overlap)\n"
+                              "Basic: every triangle, furthest first (mostly right)\n"
+                              "Advanced: depth peeling, exactly right up to the number of layers (slowest)");
+        if(settings.transparency == model_renderer::transparency_peeled) {
+            if(renderer.peel_supported) {
+                ImGui::SliderInt("Layers", &settings.transparency_layers, 2, 16, "%d", ImGuiSliderFlags_AlwaysClamp);
+                ImGui::SetItemTooltip("How many transparent surfaces deep it goes (more is slower)");
+            } else {
+                ImGui::TextDisabled("Not available on this GPU, using Basic");
+            }
+        }
         ImGui::Checkbox("Toolbar", &settings.view_toolbar);
         ImGui::Checkbox("Tree", &settings.view_tree);
         ImGui::Checkbox("Info", &settings.view_info);
@@ -1512,6 +1525,8 @@ void step_viewer::gpu_render()
     params.show_edges = settings.show_edges;
     params.realistic = model != nullptr && (model->has_pbr_materials || settings.realistic_shading);
     params.exposure = settings.exposure;
+    params.transparency = settings.transparency;
+    params.peel_layers = settings.transparency_layers;
     std::copy((float const *)settings.selection_color, (float const *)settings.selection_color + 4, params.selection_tint);
     params.parts = model != nullptr ? &model->parts : nullptr;
     params.selected_parts = &selected_parts;

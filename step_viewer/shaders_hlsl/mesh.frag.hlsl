@@ -30,5 +30,6 @@ float4 main(PSInput input) : SV_Target
 
     float3 base = lerp(input.color.rgb, tint.rgb, tint.a);
     float3 color = base * (0.3f + 0.7f * diffuse) + specular;
-    return float4(color, input.color.a);
+    // premultiplied alpha
+    return float4(color * input.color.a, input.color.a);
 }

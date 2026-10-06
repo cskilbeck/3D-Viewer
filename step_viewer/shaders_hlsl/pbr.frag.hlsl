@@ -206,5 +206,6 @@ float4 main(PSInput input) : SV_Target
 
     float3 color = (diffuse + specular) * occlusion + emitted;
     color = tone_map(color * eye.w);
-    return float4(linear_to_srgb(color), alpha);
+    // premultiplied alpha
+    return float4(linear_to_srgb(color) * alpha, alpha);
 }

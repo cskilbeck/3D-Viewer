@@ -3,6 +3,12 @@
 // Depth is reversed (near = 1, far = 0) for precision
 // Shading is either CAD (vertex colors with a headlight) or realistic (PBR materials
 // and textures lit by a built in studio environment)
+//
+// Transparency is one of
+//   none:     transparent parts sorted by distance, each drawn back faces then front faces
+//   sorted:   every transparent triangle sorted by distance (on the CPU)
+//   peeled:   depth peeling, exact up to a number of layers. The layers are drawn without
+//             MSAA into a float target, then blended over the (MSAA) opaque image
 
 #pragma once
 
@@ -24,6 +30,13 @@ struct model_renderer
     struct viewport_t
     {
         float x, y, w, h;    // in pixels
+    };
+
+    enum transparency_mode
+    {
+        transparency_none = 0,
+        transparency_sorted = 1,
+        transparency_peeled = 2,
     };
 
     bool init(gpu::device &dev, SDL_GPUTextureFormat swapchain_format);
@@ -64,13 +77,16 @@ struct model_renderer
         float background[3];
         gpu::mat4 view;
         gpu::mat4 projection;
-        gpu::vec3 eye;    // for sorting transparent parts
+        gpu::vec3 eye;    // for sorting transparent things
         bool show_edges;
         bool realistic;    // PBR rather than CAD shading
         float exposure;    // realistic shading brightness
         float selection_tint[4];                // rgb + strength
         std::vector<step_part> const *parts;    // so selected parts can be found
         std::vector<int> const *selected_parts;
+
+        int transparency;    // transparency_mode
+        int peel_layers;     // for transparency_peeled
 
         // grid on the XY plane
         bool show_grid;
@@ -85,6 +101,9 @@ struct model_renderer
     // clear the whole target to background and draw the model into the viewport
     void render(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *swapchain_texture, uint32_t width, uint32_t height, draw_params const &params);
 
+    // depth peeling needs depth textures which can be sampled and float render targets
+    bool peel_supported{ false };
+
     gpu::device *dev{};
 
     SDL_GPUSampleCount sample_count{ SDL_GPU_SAMPLECOUNT_1 };
@@ -94,11 +113,21 @@ struct model_renderer
     SDL_GPUGraphicsPipeline *mesh_pipeline{};
     SDL_GPUGraphicsPipeline *transparent_back_pipeline{};     // back faces of transparent parts
     SDL_GPUGraphicsPipeline *transparent_front_pipeline{};    // then their front faces
-    SDL_GPUGraphicsPipeline *pbr_pipeline{};                  // realistic versions of the same 3
+    SDL_GPUGraphicsPipeline *transparent_both_pipeline{};     // or both at once (sorted triangles)
+    SDL_GPUGraphicsPipeline *pbr_pipeline{};                  // realistic versions of the same 4
     SDL_GPUGraphicsPipeline *pbr_transparent_back_pipeline{};
     SDL_GPUGraphicsPipeline *pbr_transparent_front_pipeline{};
+    SDL_GPUGraphicsPipeline *pbr_transparent_both_pipeline{};
     SDL_GPUGraphicsPipeline *edge_pipeline{};
     SDL_GPUGraphicsPipeline *grid_pipeline{};
+
+    // depth peeling
+    SDL_GPUGraphicsPipeline *opaque_depth_pipeline{};    // opaque depth without MSAA
+    SDL_GPUGraphicsPipeline *peel_depth_pipeline{};      // the next layer's depth
+    SDL_GPUGraphicsPipeline *pbr_peel_depth_pipeline{};
+    SDL_GPUGraphicsPipeline *peel_color_pipeline{};    // its color, blended under the layers so far
+    SDL_GPUGraphicsPipeline *pbr_peel_color_pipeline{};
+    SDL_GPUGraphicsPipeline *composite_pipeline{};    // the layers over the opaque image
 
     SDL_GPUBuffer *grid_buffer{};    // a -1..1 square
 
@@ -106,12 +135,22 @@ struct model_renderer
     SDL_GPUTexture *white_texture{};
     SDL_GPUTexture *flat_normal_texture{};
     SDL_GPUSampler *sampler{};
+    SDL_GPUSampler *point_sampler{};    // for reading render targets back
 
     // render targets, recreated when the size changes
     SDL_GPUTexture *msaa_texture{};
     SDL_GPUTexture *depth_texture{};
     uint32_t target_width{};
     uint32_t target_height{};
+
+    // depth peeling targets (no MSAA), made when they're first needed
+    SDL_GPUTextureFormat peel_depth_format{ SDL_GPU_TEXTUREFORMAT_D32_FLOAT };
+    SDL_GPUTextureFormat layers_format{ SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT };
+    SDL_GPUTexture *opaque_depth_texture{};
+    SDL_GPUTexture *peel_depth_textures[2]{};
+    SDL_GPUTexture *layers_texture{};
+    uint32_t peel_width{};
+    uint32_t peel_height{};
 
     // the model
     SDL_GPUBuffer *vertex_buffer{};
@@ -137,7 +176,41 @@ struct model_renderer
     std::vector<step_batch> batches;
     uint32_t num_opaque_batches{};
 
+    // sorted transparency: the transparent triangles, sorted into an index buffer when the view changes
+    struct transparent_triangle
+    {
+        gpu::vec3 middle;
+        int part;
+        int material;
+    };
+
+    struct sorted_run
+    {
+        uint32_t first_index;
+        uint32_t num_indices;
+        int material;
+        bool selected;
+    };
+
+    std::vector<transparent_triangle> transparent_triangles;
+    std::vector<uint32_t> transparent_indices;    // 3 per transparent triangle
+    std::vector<uint32_t> sorted_indices;
+    std::vector<sorted_run> sorted_runs;
+    SDL_GPUBuffer *sorted_index_buffer{};
+    SDL_GPUTransferBuffer *sorted_transfer_buffer{};
+    gpu::vec3 sorted_eye{};
+    uint64_t sorted_signature{};
+    bool sorted_valid{ false };
+
 private:
     void create_targets(uint32_t width, uint32_t height);
     void release_targets();
+    void create_peel_targets(uint32_t width, uint32_t height);
+    void release_peel_targets();
+
+    void bind_material(SDL_GPUCommandBuffer *cmd, SDL_GPURenderPass *pass, draw_params const &params, int material_index, float const *tint) const;
+    void update_sorted(SDL_GPUCommandBuffer *cmd, draw_params const &params, bool realistic);
+    void draw_sorted(SDL_GPUCommandBuffer *cmd, SDL_GPURenderPass *pass, draw_params const &params, bool realistic) const;
+    void draw_transparent_parts(SDL_GPUCommandBuffer *cmd, SDL_GPURenderPass *pass, draw_params const &params, bool realistic) const;
+    void render_peeled(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *swapchain_texture, draw_params const &params, bool realistic);
 };

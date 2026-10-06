@@ -242,6 +242,18 @@
     "textures": 1,
     "triangles": 12
   },
+  "gltf/transparency.glb": {
+    "materials": 6,
+    "parts": 4,
+    "realistic": true,
+    "size": [
+      40.0,
+      40.0,
+      40.0
+    ],
+    "textures": 0,
+    "triangles": 612
+  },
   "mesh/box.3mf": {
     "materials": 2,
     "parts": 1,

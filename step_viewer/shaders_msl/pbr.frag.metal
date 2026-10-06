@@ -208,5 +208,6 @@ fragment float4 main0(
 
     float3 color = (diffuse + specular) * occlusion + emitted;
     color = tone_map(color * u.eye.w);
-    return float4(linear_to_srgb(color), alpha);
+    // premultiplied alpha
+    return float4(linear_to_srgb(color) * alpha, alpha);
 }

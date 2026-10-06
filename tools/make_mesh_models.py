@@ -422,6 +422,26 @@ def make_gltf():
     g.node('instances', children=[plain, rotated, mirrored, stretched, nested])
     write_bytes('gltf/hierarchy.glb', g.glb())
 
+    # three see-through planes through each other (red XY, green YZ, blue XZ) and an opaque box poking through
+    # them: sorting whole parts can't get this right, sorting triangles mostly can, depth peeling does
+    g = Gltf()
+    n = 10
+    grid = [(i / n, j / n) for j in range(n + 1) for i in range(n + 1)]
+    cells = [(j * (n + 1) + i, j * (n + 1) + i + 1, (j + 1) * (n + 1) + i + 1, j * (n + 1) + i, (j + 1) * (n + 1) + i + 1, (j + 1) * (n + 1) + i)
+             for j in range(n) for i in range(n)]
+    triangles = [t for c in cells for t in (c[0:3], c[3:6])]
+    size = 0.04
+    planes = [('red', [0.9, 0.1, 0.1, 0.5], lambda u, v: ((u - 0.5) * size, (v - 0.5) * size, 0), (0, 0, 1)),
+              ('green', [0.1, 0.8, 0.1, 0.5], lambda u, v: (0, (v - 0.5) * size, (u - 0.5) * size), (1, 0, 0)),
+              ('blue', [0.1, 0.3, 0.9, 0.5], lambda u, v: ((u - 0.5) * size, 0, (v - 0.5) * size), (0, 1, 0))]
+    for name, color, position, normal in planes:
+        material = g.material(name=name, alphaMode='BLEND', doubleSided=True,
+                              pbrMetallicRoughness={'baseColorFactor': color, 'metallicFactor': 0, 'roughnessFactor': 0.4})
+        g.node(f'{name}_plane', g.mesh(f'{name}_plane', [position(u, v) for u, v in grid], triangles, material, [normal] * len(grid)))
+    grey = g.material(name='grey', pbrMetallicRoughness={'baseColorFactor': [0.6, 0.6, 0.6, 1], 'metallicFactor': 0, 'roughnessFactor': 0.5})
+    g.node('box', gltf_box(g, 'box', 10, 10, 10, grey), translation=[0.005, 0.005, -0.005])
+    write_bytes('gltf/transparency.glb', g.glb())
+
     # a long way from the origin (a kilometer)
     g = Gltf()
     g.node('far_box', gltf_box(g, 'far_box', 10, 10, 10, g.material(**red)), translation=[1000, 0, -1000])

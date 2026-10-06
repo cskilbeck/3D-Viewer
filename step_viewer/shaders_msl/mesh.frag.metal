@@ -35,5 +35,6 @@ fragment float4 main0(
 
     float3 base = mix(in.color.rgb, u.tint.rgb, u.tint.a);
     float3 color = base * (0.3 + 0.7 * diffuse) + specular;
-    return float4(color, in.color.a);
+    // premultiplied alpha
+    return float4(color * in.color.a, in.color.a);
 }
