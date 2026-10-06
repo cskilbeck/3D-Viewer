@@ -1,38 +1,40 @@
 //////////////////////////////////////////////////////////////////////
+// Loading CAD formats with OpenCascade, picking the loader for a file, and
+// the step_model functions (picking, visibility)
 
 #include <BRepBndLib.hxx>
 #include <BRepLib_ToolTriangulatedShape.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
+#include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
-#include <IMeshTools_Parameters.hxx>
-#include <Message_ProgressIndicator.hxx>
-#include <Message_ProgressScope.hxx>
-#include <Poly_PolygonOnTriangulation.hxx>
-#include <Poly_Triangulation.hxx>
-#include <Quantity_Color.hxx>
-#include <Quantity_ColorRGBA.hxx>
 #include <DEBREP_ConfigurationNode.hxx>
-#include <DEGLTF_ConfigurationNode.hxx>
 #include <DEIGES_ConfigurationNode.hxx>
-#include <DEOBJ_ConfigurationNode.hxx>
 #include <DESTEP_ConfigurationNode.hxx>
 #include <DESTL_ConfigurationNode.hxx>
 #include <DEVRML_ConfigurationNode.hxx>
 #include <DEXCAF_ConfigurationNode.hxx>
 #include <DE_Wrapper.hxx>
+#include <IMeshTools_Parameters.hxx>
+#include <Image_Texture.hxx>
+#include <Message_ProgressIndicator.hxx>
+#include <Message_ProgressScope.hxx>
+#include <NCollection_Buffer.hxx>
+#include <Poly_PolygonOnTriangulation.hxx>
+#include <Poly_Triangulation.hxx>
+#include <Quantity_Color.hxx>
+#include <Quantity_ColorRGBA.hxx>
 #include <TCollection_AsciiString.hxx>
 #include <TDF_Label.hxx>
 #include <TDataStd_Name.hxx>
 #include <TDocStd_Document.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_ShapeMapHasher.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_TShape.hxx>
-#include <TopTools_ShapeMapHasher.hxx>
-#include <BRep_Builder.hxx>
 #include <XCAFApp_Application.hxx>
 #include <XCAFDoc_ColorTool.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
@@ -41,15 +43,18 @@
 #include <XCAFDoc_VisMaterialTool.hxx>
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <format>
+#include <fstream>
+#include <map>
 #include <optional>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 
 #include "log.h"
 #include "util.h"
+#include "model_builder.h"
 #include "step_model.h"
 
 LOG_CONTEXT("step_model", info);
@@ -71,6 +76,18 @@ struct step_document
 
 namespace
 {
+    //////////////////////////////////////////////////////////////////////
+
+    std::string lower_extension(std::filesystem::path const &path)
+    {
+        std::string extension = path.extension().string();
+        if(!extension.empty() && extension[0] == '.') {
+            extension.erase(0, 1);
+        }
+        std::transform(extension.begin(), extension.end(), extension.begin(), [](char c) { return (char)std::tolower((unsigned char)c); });
+        return extension;
+    }
+
     //////////////////////////////////////////////////////////////////////
     // Report progress and check for cancellation
 
@@ -110,36 +127,143 @@ namespace
     }
 
     //////////////////////////////////////////////////////////////////////
-    // Build the tree and flatten the assembly into triangles + edges for the GPU
+    // An image from a file, or a buffer in the file
 
-    struct mesh_builder
+    std::optional<step_texture> load_texture(Image_Texture const &texture, bool srgb)
     {
-        using shape_color_map = std::unordered_map<TopoDS_Shape, uint32_t, TopTools_ShapeMapHasher, TopTools_ShapeMapHasher>;
+        std::vector<uint8_t> data;
+
+        occ::handle<NCollection_Buffer> const &buffer = texture.DataBuffer();
+        if(!buffer.IsNull() && buffer->Size() != 0) {
+            data.assign(buffer->Data(), buffer->Data() + buffer->Size());
+        } else if(!texture.FilePath().IsEmpty()) {
+            std::string const path_utf8 = texture.FilePath().ToCString();
+            std::ifstream file(std::filesystem::path(std::u8string(path_utf8.begin(), path_utf8.end())), std::ios::binary);
+            if(!file) {
+                LOG_WARNING("Can't open texture {}", path_utf8);
+                return std::nullopt;
+            }
+            file.seekg(0, std::ios::end);
+            int64_t file_size = (int64_t)file.tellg();
+            int64_t offset = std::max<int64_t>(texture.FileOffset(), 0);
+            int64_t length = texture.FileLength() > 0 ? texture.FileLength() : file_size - offset;
+            if(offset + length > file_size || length <= 0) {
+                LOG_WARNING("Bad texture range in {}", path_utf8);
+                return std::nullopt;
+            }
+            data.resize((size_t)length);
+            file.seekg(offset);
+            file.read((char *)data.data(), length);
+        }
+        if(data.empty()) {
+            return std::nullopt;
+        }
+        return decode_texture(data.data(), data.size(), srgb, texture.TextureId().ToCString());
+    }
+
+    //////////////////////////////////////////////////////////////////////
+    // Build the tree from the XCAF document and flatten the assembly into triangles + edges
+
+    struct xcaf_reader
+    {
+        // what a face (or solid/shell) of a part says about how it looks, overriding the part
+        struct face_style
+        {
+            std::optional<uint32_t> color;
+            int material{ -1 };
+        };
+
+        using face_style_map = std::unordered_map<TopoDS_Shape, face_style, TopTools_ShapeMapHasher, TopTools_ShapeMapHasher>;
         using shape_set = std::unordered_set<TopoDS_Shape, TopTools_ShapeMapHasher, TopTools_ShapeMapHasher>;
 
-        static constexpr uint32_t default_color = 0xffbfbfbf;
-
         step_model &model;
-        gp_XYZ center;
+        model_builder &builder;
         std::stop_token stop;
 
-        // transparent triangles of the part being added, and of all the parts so far (by part index)
-        std::vector<uint32_t> transparent_indices;
-        std::vector<std::vector<uint32_t>> part_transparent_indices;
+        // materials and textures already converted
+        std::unordered_map<XCAFDoc_VisMaterial const *, int> material_ids;
+        std::map<std::pair<std::string, bool>, int> texture_ids;
 
         //////////////////////////////////////////////////////////////////////
-        // put the transparent triangles after all the opaque ones
 
-        void finish()
+        int add_texture(occ::handle<Image_Texture> const &texture, bool srgb)
         {
-            model.num_opaque_indices = (uint32_t)model.indices.size();
-            for(size_t i = 0; i < model.parts.size(); ++i) {
-                step_part &part = model.parts[i];
-                part.first_transparent_index = (uint32_t)model.indices.size();
-                part.num_transparent_indices = (uint32_t)part_transparent_indices[i].size();
-                model.indices.insert(model.indices.end(), part_transparent_indices[i].begin(), part_transparent_indices[i].end());
+            if(texture.IsNull()) {
+                return -1;
             }
-            part_transparent_indices.clear();
+            auto key = std::make_pair(std::string(texture->TextureId().ToCString()), srgb);
+            if(auto found = texture_ids.find(key); found != texture_ids.end()) {
+                return found->second;
+            }
+            int id = -1;
+            if(std::optional<step_texture> loaded = load_texture(*texture, srgb)) {
+                id = (int)model.textures.size();
+                model.textures.push_back(std::move(*loaded));
+            }
+            texture_ids[key] = id;
+            return id;
+        }
+
+        //////////////////////////////////////////////////////////////////////
+        // convert a material (once), returns -1 if there isn't one
+
+        int label_material(TDF_Label const &label)
+        {
+            occ::handle<XCAFDoc_VisMaterial> vis = XCAFDoc_VisMaterialTool::GetShapeMaterial(label);
+            if(vis.IsNull() || vis->IsEmpty()) {
+                return -1;
+            }
+            if(auto found = material_ids.find(vis.get()); found != material_ids.end()) {
+                return found->second;
+            }
+
+            step_material m;
+            if(vis->HasPbrMaterial()) {
+                XCAFDoc_VisMaterialPBR const &pbr = vis->PbrMaterial();
+                m.metallic = pbr.Metallic;
+                m.roughness = pbr.Roughness;
+                m.emissive[0] = pbr.EmissiveFactor.r();
+                m.emissive[1] = pbr.EmissiveFactor.g();
+                m.emissive[2] = pbr.EmissiveFactor.b();
+                m.base_color_texture = add_texture(pbr.BaseColorTexture, true);
+                m.metallic_roughness_texture = add_texture(pbr.MetallicRoughnessTexture, false);
+                m.normal_texture = add_texture(pbr.NormalTexture, false);
+                m.occlusion_texture = add_texture(pbr.OcclusionTexture, false);
+                m.emissive_texture = add_texture(pbr.EmissiveTexture, true);
+                model.has_pbr_materials = true;
+            } else {
+                // Phong, shininess 0..1 is the exponent / 128
+                XCAFDoc_VisMaterialCommon const &common = vis->CommonMaterial();
+                float exponent = std::max(common.Shininess * 128.0f, 1.0f);
+                m.roughness = std::clamp(std::sqrt(2.0f / (exponent + 2.0f)), 0.05f, 1.0f);
+                m.emissive[0] = (float)common.EmissiveColor.Red();
+                m.emissive[1] = (float)common.EmissiveColor.Green();
+                m.emissive[2] = (float)common.EmissiveColor.Blue();
+                m.base_color_texture = add_texture(common.DiffuseTexture, true);
+                if(m.base_color_texture >= 0) {
+                    model.has_pbr_materials = true;
+                }
+            }
+
+            switch(vis->AlphaMode()) {
+            case Graphic3d_AlphaMode_Opaque:
+                m.opaque = true;
+                break;
+            case Graphic3d_AlphaMode_Mask:
+                m.alpha_cutoff = std::max(vis->AlphaCutOff(), 1e-4f);
+                break;
+            case Graphic3d_AlphaMode_Blend:
+            case Graphic3d_AlphaMode_MaskBlend:
+                m.blend = true;
+                break;
+            default:
+                break;    // BlendAuto: transparent if the color is
+            }
+
+            int id = (int)model.materials.size();
+            model.materials.push_back(m);
+            material_ids[vis.get()] = id;
+            return id;
         }
 
         //////////////////////////////////////////////////////////////////////
@@ -160,7 +284,7 @@ namespace
             if(XCAFDoc_ColorTool::GetColor(label, XCAFDoc_ColorSurf, color) || XCAFDoc_ColorTool::GetColor(label, XCAFDoc_ColorGen, color)) {
                 return pack_color(color);
             }
-            // mesh formats (OBJ, glTF) have materials rather than colors
+            // some files have materials rather than colors
             occ::handle<XCAFDoc_VisMaterial> material = XCAFDoc_VisMaterialTool::GetShapeMaterial(label);
             if(!material.IsNull()) {
                 return pack_color(material->BaseColor());
@@ -169,37 +293,11 @@ namespace
         }
 
         //////////////////////////////////////////////////////////////////////
-
-        void add_vertex(gp_Pnt const &p, gp_Dir const &n, uint32_t color)
-        {
-            gp_XYZ v = p.XYZ() - center;
-            model.vertices.push_back({ { (float)v.X(), (float)v.Y(), (float)v.Z() }, { (float)n.X(), (float)n.Y(), (float)n.Z() }, color });
-        }
-
-        //////////////////////////////////////////////////////////////////////
-
-        void add_edge_vertex(gp_Pnt const &p)
-        {
-            gp_XYZ v = p.XYZ() - center;
-            model.edges.push_back({ { (float)v.X(), (float)v.Y(), (float)v.Z() } });
-        }
-
-        //////////////////////////////////////////////////////////////////////
-
-        static void set_node_color(step_node &node, uint32_t color)
-        {
-            node.has_color = true;
-            node.color[0] = (float)(color & 0xff) / 255.0f;
-            node.color[1] = (float)((color >> 8) & 0xff) / 255.0f;
-            node.color[2] = (float)((color >> 16) & 0xff) / 255.0f;
-        }
-
-        //////////////////////////////////////////////////////////////////////
         // label is a free shape or a component (instance) of an assembly
         // colors: face (subshape) > instance (nearest) > part > default
         // returns the index of the new node
 
-        int add_label(TDF_Label const &label, int parent, TopLoc_Location const &parent_location, std::optional<uint32_t> inherited_color)
+        int add_label(TDF_Label const &label, int parent, TopLoc_Location const &parent_location, std::optional<uint32_t> inherited_color, int inherited_material)
         {
             int node_index = (int)model.nodes.size();
             model.nodes.emplace_back();
@@ -213,12 +311,16 @@ namespace
             TopLoc_Location location = parent_location;
             TDF_Label shape_label = label;
             std::optional<uint32_t> color = inherited_color;
+            int material = inherited_material;
 
             if(XCAFDoc_ShapeTool::IsReference(label)) {
                 location = parent_location * XCAFDoc_ShapeTool::GetLocation(label);
                 if(auto instance_color = label_color(label)) {
                     color = instance_color;
-                    set_node_color(model.nodes[node_index], *instance_color);
+                    model_builder::set_node_color(model.nodes[node_index], *instance_color);
+                }
+                if(int instance_material = label_material(label); instance_material >= 0) {
+                    material = instance_material;
                 }
                 XCAFDoc_ShapeTool::GetReferredShape(label, shape_label);
                 if(model.nodes[node_index].name.empty()) {
@@ -232,7 +334,7 @@ namespace
 
             std::optional<uint32_t> own_color = label_color(shape_label);
             if(own_color.has_value() && !model.nodes[node_index].has_color) {
-                set_node_color(model.nodes[node_index], *own_color);
+                model_builder::set_node_color(model.nodes[node_index], *own_color);
             }
 
             if(XCAFDoc_ShapeTool::IsAssembly(shape_label)) {
@@ -241,7 +343,7 @@ namespace
                 XCAFDoc_ShapeTool::GetComponents(shape_label, components);
                 for(TDF_Label const &component : components) {
                     // careful, add_label() can reallocate model.nodes
-                    int child = add_label(component, node_index, location, color);
+                    int child = add_label(component, node_index, location, color, material);
                     model.nodes[node_index].children.push_back(child);
                 }
                 return node_index;
@@ -250,221 +352,39 @@ namespace
             if(!color.has_value()) {
                 color = own_color;
             }
+            if(material < 0) {
+                material = label_material(shape_label);
+            }
 
             TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(shape_label);
             if(shape.IsNull()) {
                 return node_index;
             }
 
-            // colors attached to faces (or solids/shells) of the part
-            shape_color_map face_colors;
+            // colors/materials attached to faces (or solids/shells) of the part
+            face_style_map face_styles;
             NCollection_Sequence<TDF_Label> sub_shapes;
             if(XCAFDoc_ShapeTool::GetSubShapes(shape_label, sub_shapes)) {
                 for(TDF_Label const &sub_label : sub_shapes) {
-                    if(auto sub_color = label_color(sub_label)) {
+                    face_style style{ label_color(sub_label), label_material(sub_label) };
+                    if(style.color.has_value() || style.material >= 0) {
                         TopoDS_Shape sub_shape = XCAFDoc_ShapeTool::GetShape(sub_label);
                         for(TopExp_Explorer exp(sub_shape, TopAbs_FACE); exp.More(); exp.Next()) {
-                            face_colors[exp.Current()] = *sub_color;
+                            face_styles[exp.Current()] = style;
                         }
                     }
                 }
             }
 
-            // record where this part's triangles are
-            step_part part;
-            part.node = node_index;
-            part.first_index = (uint32_t)model.indices.size();
-            part.first_edge_vertex = (uint32_t)model.edges.size();
-            size_t first_vertex = model.vertices.size();
-            transparent_indices.clear();
-
-            add_shape(shape, location, color.value_or(default_color), face_colors);
-
-            part.num_indices = (uint32_t)model.indices.size() - part.first_index;
-            part.num_edge_vertices = (uint32_t)model.edges.size() - part.first_edge_vertex;
-            if(part.num_indices != 0 || !transparent_indices.empty()) {
-                float constexpr big = 3.4e38f;
-                part.bounds_min = { big, big, big };
-                part.bounds_max = { -big, -big, -big };
-                for(size_t i = first_vertex; i < model.vertices.size(); ++i) {
-                    float const *p = model.vertices[i].position;
-                    part.bounds_min = { std::min(part.bounds_min.x, p[0]), std::min(part.bounds_min.y, p[1]), std::min(part.bounds_min.z, p[2]) };
-                    part.bounds_max = { std::max(part.bounds_max.x, p[0]), std::max(part.bounds_max.y, p[1]), std::max(part.bounds_max.z, p[2]) };
-                }
-                model.nodes[node_index].part = (int)model.parts.size();
-                model.parts.push_back(part);
-                part_transparent_indices.push_back(transparent_indices);
-            }
+            builder.begin_part();
+            add_shape(shape, location, color.value_or(model_builder::default_color), std::max(material, 0), face_styles);
+            builder.end_part(node_index);
             return node_index;
         }
 
         //////////////////////////////////////////////////////////////////////
-        // Edges for a mesh: where the triangles either side meet at more than the
-        // crease angle, or there's only one triangle (an open boundary). Vertices
-        // are welded by position first because a lot of files duplicate them along
-        // normal/texture seams, which would otherwise look like boundaries
 
-        static constexpr double crease_angle_degrees = 35.0;
-
-        void add_feature_edges(occ::handle<Poly_Triangulation> const &triangulation, gp_Trsf const &transform)
-        {
-            double const crease_cos = std::cos(crease_angle_degrees * 3.14159265358979 / 180.0);
-
-            int num_nodes = triangulation->NbNodes();
-            int num_triangles = triangulation->NbTriangles();
-
-            // weld: quantize positions to a tiny fraction of the mesh size
-            Bnd_Box box;
-            for(int i = 1; i <= num_nodes; ++i) {
-                box.Add(triangulation->Node(i));
-            }
-            double cell = std::max(std::sqrt(box.SquareExtent()) * 1e-7, 1e-12);
-
-            struct key_hash
-            {
-                size_t operator()(std::array<int64_t, 3> const &k) const noexcept
-                {
-                    return std::hash<int64_t>{}(k[0] * 73856093LL ^ k[1] * 19349663LL ^ k[2] * 83492791LL);
-                }
-            };
-            std::unordered_map<std::array<int64_t, 3>, int, key_hash> position_ids;
-            std::vector<int> welded(num_nodes + 1);
-            for(int i = 1; i <= num_nodes; ++i) {
-                gp_XYZ p = triangulation->Node(i).XYZ();
-                std::array<int64_t, 3> key{ std::llround(p.X() / cell), std::llround(p.Y() / cell), std::llround(p.Z() / cell) };
-                welded[i] = position_ids.try_emplace(key, i).first->second;
-            }
-
-            // triangles around each (welded) edge
-            struct edge_info
-            {
-                int a, b;               // original node indices, for positions
-                int triangles[2];
-                int count;
-            };
-            std::unordered_map<uint64_t, edge_info> edges;
-            std::vector<gp_XYZ> normals(num_triangles);
-
-            for(int t = 0; t < num_triangles; ++t) {
-                int n[3];
-                triangulation->Triangle(t + 1).Get(n[0], n[1], n[2]);
-                gp_XYZ p0 = triangulation->Node(n[0]).XYZ();
-                gp_XYZ normal = (triangulation->Node(n[1]).XYZ() - p0).Crossed(triangulation->Node(n[2]).XYZ() - p0);
-                double length = normal.Modulus();
-                normals[t] = length > 0 ? normal / length : gp_XYZ(0, 0, 0);
-                for(int k = 0; k < 3; ++k) {
-                    int a = n[k];
-                    int b = n[(k + 1) % 3];
-                    int wa = welded[a];
-                    int wb = welded[b];
-                    if(wa == wb) {
-                        continue;    // degenerate
-                    }
-                    uint64_t key = ((uint64_t)std::min(wa, wb) << 32) | (uint32_t)std::max(wa, wb);
-                    auto [it, inserted] = edges.try_emplace(key, edge_info{ a, b, { t, -1 }, 0 });
-                    if(it->second.count < 2) {
-                        it->second.triangles[it->second.count] = t;
-                    }
-                    it->second.count += 1;
-                }
-            }
-
-            for(auto const &[key, edge] : edges) {
-                bool sharp = edge.count != 2;    // boundary or non-manifold
-                if(!sharp) {
-                    // winding may differ either side (welded seams), so compare the angle either way round
-                    double cos_angle = std::abs(normals[edge.triangles[0]].Dot(normals[edge.triangles[1]]));
-                    sharp = cos_angle < crease_cos;
-                }
-                if(sharp) {
-                    add_edge_vertex(triangulation->Node(edge.a).Transformed(transform));
-                    add_edge_vertex(triangulation->Node(edge.b).Transformed(transform));
-                }
-            }
-        }
-
-        //////////////////////////////////////////////////////////////////////
-        // Mesh formats (STL, OBJ without normals etc) share vertices across sharp
-        // edges, so averaging the normals at each vertex makes everything look
-        // blobby. Instead each corner of each triangle averages only the triangles
-        // around that vertex which are within the crease angle of its own
-
-        void add_creased_triangles(occ::handle<Poly_Triangulation> const &triangulation, gp_Trsf const &transform, bool reversed, bool flip_winding,
-                                   uint32_t face_color)
-        {
-            double const crease_cos = std::cos(crease_angle_degrees * 3.14159265358979 / 180.0);
-
-            int num_nodes = triangulation->NbNodes();
-            int num_triangles = triangulation->NbTriangles();
-
-            // area weighted (cross product) and unit normal of each triangle
-            std::vector<gp_XYZ> weighted(num_triangles);
-            std::vector<gp_XYZ> unit(num_triangles);
-            std::vector<int> corners(num_triangles * 3);
-
-            // which triangles use each vertex (compressed: first[v]..first[v+1])
-            std::vector<int> first(num_nodes + 2, 0);
-
-            for(int t = 0; t < num_triangles; ++t) {
-                int n[3];
-                triangulation->Triangle(t + 1).Get(n[0], n[1], n[2]);
-                gp_XYZ p0 = triangulation->Node(n[0]).XYZ();
-                gp_XYZ e1 = triangulation->Node(n[1]).XYZ() - p0;
-                gp_XYZ e2 = triangulation->Node(n[2]).XYZ() - p0;
-                weighted[t] = e1.Crossed(e2);
-                double length = weighted[t].Modulus();
-                unit[t] = length > 0 ? weighted[t] / length : gp_XYZ(0, 0, 0);
-                for(int k = 0; k < 3; ++k) {
-                    corners[t * 3 + k] = n[k];
-                    first[n[k] + 1] += 1;
-                }
-            }
-            for(int v = 1; v <= num_nodes + 1; ++v) {
-                first[v] += first[v - 1];
-            }
-            std::vector<int> fill(first.begin(), first.end());
-            std::vector<int> adjacent(num_triangles * 3);
-            for(int t = 0; t < num_triangles; ++t) {
-                for(int k = 0; k < 3; ++k) {
-                    adjacent[fill[corners[t * 3 + k]]++] = t;
-                }
-            }
-
-            // every corner gets its own vertex
-            for(int t = 0; t < num_triangles; ++t) {
-                uint32_t base = (uint32_t)model.vertices.size();
-                for(int k = 0; k < 3; ++k) {
-                    int v = corners[t * 3 + k];
-                    gp_XYZ sum(0, 0, 0);
-                    for(int i = first[v]; i < first[v + 1]; ++i) {
-                        int other = adjacent[i];
-                        if(unit[t].Dot(unit[other]) >= crease_cos) {
-                            sum += weighted[other];
-                        }
-                    }
-                    if(sum.Modulus() <= 0) {
-                        sum = unit[t].Modulus() > 0 ? unit[t] : gp_XYZ(0, 0, 1);
-                    }
-                    gp_Dir normal = gp_Dir(sum).Transformed(transform);
-                    if(reversed) {
-                        normal.Reverse();
-                    }
-                    add_vertex(triangulation->Node(v).Transformed(transform), normal, face_color);
-                }
-                uint32_t a = base, b = base + 1, c = base + 2;
-                if(flip_winding) {
-                    std::swap(b, c);
-                }
-                auto &dest = (face_color >> 24) == 0xff ? model.indices : transparent_indices;
-                dest.push_back(a);
-                dest.push_back(b);
-                dest.push_back(c);
-            }
-        }
-
-        //////////////////////////////////////////////////////////////////////
-
-        void add_shape(TopoDS_Shape const &shape, TopLoc_Location const &location, uint32_t color, shape_color_map const &face_colors)
+        void add_shape(TopoDS_Shape const &shape, TopLoc_Location const &location, uint32_t color, int material, face_style_map const &face_styles)
         {
             for(TopExp_Explorer exp(shape, TopAbs_SOLID); exp.More(); exp.Next()) {
                 model.num_solids += 1;
@@ -489,51 +409,22 @@ namespace
                 bool flip_winding = reversed != transform.IsNegative();
 
                 uint32_t face_color = color;
-                if(auto found = face_colors.find(face); found != face_colors.end()) {
-                    face_color = found->second;
+                int face_material = material;
+                if(auto found = face_styles.find(face); found != face_styles.end()) {
+                    face_color = found->second.color.value_or(face_color);
+                    if(found->second.material >= 0) {
+                        face_material = found->second.material;
+                    }
                 }
 
-                // faces from mesh formats (no surface) have no CAD edges, find the sharp ones
+                // faces from mesh formats (STL, VRML) have no surface
                 TopLoc_Location surface_location;
                 bool mesh_only = BRep_Tool::Surface(face, surface_location).IsNull();
-                if(mesh_only) {
-                    add_feature_edges(triangulation, transform);
+                if(!mesh_only) {
+                    BRepLib_ToolTriangulatedShape::ComputeNormals(face, triangulation);
                 }
 
-                // and if the file didn't have normals, make some which keep the sharp edges sharp
-                if(mesh_only && !triangulation->HasNormals()) {
-                    add_creased_triangles(triangulation, transform, reversed, flip_winding, face_color);
-                    model.num_faces += 1;
-                    model.num_triangles += triangulation->NbTriangles();
-                    continue;
-                }
-
-                BRepLib_ToolTriangulatedShape::ComputeNormals(face, triangulation);
-
-                uint32_t base = (uint32_t)model.vertices.size();
-
-                for(int i = 1; i <= triangulation->NbNodes(); ++i) {
-                    gp_Dir normal = triangulation->Normal(i).Transformed(transform);
-                    if(reversed) {
-                        normal.Reverse();
-                    }
-                    add_vertex(triangulation->Node(i).Transformed(transform), normal, face_color);
-                }
-
-                for(int i = 1; i <= triangulation->NbTriangles(); ++i) {
-                    int a, b, c;
-                    triangulation->Triangle(i).Get(a, b, c);
-                    if(flip_winding) {
-                        std::swap(b, c);
-                    }
-                    auto &dest = (face_color >> 24) == 0xff ? model.indices : transparent_indices;
-                    dest.push_back(base + a - 1);
-                    dest.push_back(base + b - 1);
-                    dest.push_back(base + c - 1);
-                }
-
-                model.num_faces += 1;
-                model.num_triangles += triangulation->NbTriangles();
+                builder.add_triangles(triangulation, transform, reversed, flip_winding, mesh_only, face_color, face_material);
             }
 
             // edges, each one once (they're shared by 2 faces)
@@ -559,8 +450,8 @@ namespace
                 gp_Trsf transform = (location * edge_location).Transformation();
 
                 for(int i = 1; i < polygon->NbNodes(); ++i) {
-                    add_edge_vertex(triangulation->Node(polygon->Node(i)).Transformed(transform));
-                    add_edge_vertex(triangulation->Node(polygon->Node(i + 1)).Transformed(transform));
+                    builder.add_edge_vertex(triangulation->Node(polygon->Node(i)).Transformed(transform));
+                    builder.add_edge_vertex(triangulation->Node(polygon->Node(i + 1)).Transformed(transform));
                 }
             }
         }
@@ -569,8 +460,47 @@ namespace
 }    // namespace
 
 //////////////////////////////////////////////////////////////////////
+// OpenCascade does the CAD formats, and STL and VRML (which Assimp is no better at)
 
-std::expected<std::unique_ptr<step_model>, std::string> load_step_model(std::filesystem::path const &path, std::stop_token stop, std::atomic<float> &progress)
+std::vector<std::string> occt_extensions()
+{
+    return { "step", "stp", "stpz", "iges", "igs", "stl", "wrl", "vrml", "brep", "xbf" };
+}
+
+//////////////////////////////////////////////////////////////////////
+
+std::vector<std::string> supported_file_extensions()
+{
+    std::set<std::string> all;
+    for(std::string const &extension : occt_extensions()) {
+        all.insert(extension);
+    }
+    for(std::string const &extension : assimp_extensions()) {
+        all.insert(extension);
+    }
+    return { all.begin(), all.end() };
+}
+
+//////////////////////////////////////////////////////////////////////
+
+load_result load_step_model(std::filesystem::path const &path, std::stop_token stop, std::atomic<float> &progress)
+{
+    std::string extension = lower_extension(path);
+    std::vector<std::string> const occt = occt_extensions();
+    bool use_occt = std::find(occt.begin(), occt.end(), extension) != occt.end();
+    load_result result = use_occt ? load_occt_model(path, stop, progress) : load_assimp_model(path, stop, progress);
+
+    // an empty (or not really the right kind of) file can "load" with nothing in it
+    if(result.has_value() && result.value()->indices.empty() && result.value()->edges.empty()) {
+        std::u8string name = path.u8string();
+        return std::unexpected(std::format("There's nothing to show in {}", std::string(name.begin(), name.end())));
+    }
+    return result;
+}
+
+//////////////////////////////////////////////////////////////////////
+
+load_result load_occt_model(std::filesystem::path const &path, std::stop_token stop, std::atomic<float> &progress)
 {
     auto model = std::make_unique<step_model>();
     model->path = path;
@@ -590,13 +520,9 @@ std::expected<std::unique_ptr<step_model>, std::string> load_step_model(std::fil
     // read names and colors, and everything is converted to millimeters)
     occ::handle<DE_Wrapper> wrapper = new DE_Wrapper();
 
-    // OBJ has no units, the reader assumes meters but CAD exports are almost always millimeters
-    occ::handle<DEOBJ_ConfigurationNode> obj_reader = new DEOBJ_ConfigurationNode();
-    obj_reader->InternalParameters.FileLengthUnit = 0.001;
-
     occ::handle<DE_ConfigurationNode> const readers[] = {
-        new DESTEP_ConfigurationNode(), new DEIGES_ConfigurationNode(), new DESTL_ConfigurationNode(), obj_reader,
-        new DEGLTF_ConfigurationNode(), new DEVRML_ConfigurationNode(), new DEBREP_ConfigurationNode(), new DEXCAF_ConfigurationNode(),
+        new DESTEP_ConfigurationNode(), new DEIGES_ConfigurationNode(), new DESTL_ConfigurationNode(),
+        new DEVRML_ConfigurationNode(), new DEBREP_ConfigurationNode(), new DEXCAF_ConfigurationNode(),
     };
     for(auto const &reader : readers) {
         wrapper->Bind(reader);
@@ -664,7 +590,7 @@ std::expected<std::unique_ptr<step_model>, std::string> load_step_model(std::fil
         params.Angle = 0.35;
         params.InParallel = true;
 
-        // Faces from mesh formats (STL, OBJ etc) have a triangulation but no surface. The mesher
+        // Faces from mesh formats (STL, VRML) have a triangulation but no surface. The mesher
         // would throw their triangulation away if it didn't like it and have nothing to replace
         // it with, so it only gets faces with surfaces (each shared face once)
         TopoDS_Compound to_mesh;
@@ -694,10 +620,13 @@ std::expected<std::unique_ptr<step_model>, std::string> load_step_model(std::fil
         model->radius = std::max(std::sqrt(bounds.SquareExtent()) * 0.5, 1e-6);
     }
 
-    mesh_builder flattener{ *model, gp_XYZ(model->center[0], model->center[1], model->center[2]), stop };
+    model->materials.emplace_back();    // the default
+
+    model_builder flattener(*model, gp_XYZ(model->center[0], model->center[1], model->center[2]));
+    xcaf_reader reader{ *model, flattener, stop };
 
     for(TDF_Label const &label : free_shapes) {
-        model->roots.push_back(flattener.add_label(label, -1, TopLoc_Location(), std::nullopt));
+        model->roots.push_back(reader.add_label(label, -1, TopLoc_Location(), std::nullopt, -1));
     }
     flattener.finish();
 
@@ -709,13 +638,16 @@ std::expected<std::unique_ptr<step_model>, std::string> load_step_model(std::fil
 
     progress = 1;
 
-    LOG_INFO("Loaded {}: {} solids, {} faces, {} triangles ({} transparent), {} edge segments (read {:.2f}s, mesh {:.2f}s)",
+    LOG_INFO("Loaded {} with OpenCascade: {} solids, {} faces, {} triangles ({} transparent), {} edge segments, {} materials, {} textures (read {:.2f}s, mesh "
+             "{:.2f}s)",
              filename,
              model->num_solids,
              model->num_faces,
              model->num_triangles,
              (model->indices.size() - model->num_opaque_indices) / 3,
              model->edges.size() / 2,
+             model->materials.size(),
+             model->textures.size(),
              model->read_time,
              model->mesh_time);
 

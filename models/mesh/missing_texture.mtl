@@ -1,0 +1,3 @@
+newmtl missing
+Kd 0.8 0.3 0.3
+map_Kd this_file_does_not_exist.png

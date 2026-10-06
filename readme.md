@@ -1,23 +1,68 @@
 # 3D Viewer
 
-A cross-platform (Windows, macOS, Linux) viewer for 3D models (STEP, IGES, STL, OBJ, glTF, VRML...). Same application structure as [Gerber Explorer](https://github.com/cskilbeck/gerber_explorer): SDL3 + SDL_GPU for windowing and rendering, Dear ImGui for the UI.
+A cross-platform (Windows, macOS, Linux) viewer for 3D models (STEP, IGES, glTF, FBX, OBJ, STL, 3MF and many more). Same application structure as [Gerber Explorer](https://github.com/cskilbeck/gerber_explorer): SDL3 + SDL_GPU for windowing and rendering, Dear ImGui for the UI.
 
-This is a work in progress. STEP files are loaded with [OpenCascade](https://github.com/Open-Cascade-SAS/OCCT) (assembly tree, names and colors), meshed and drawn with SDL_GPU.
+This is a work in progress. CAD formats are loaded with [OpenCascade](https://github.com/Open-Cascade-SAS/OCCT) (assembly tree, names and colors) and meshed, mesh formats are loaded with [Assimp](https://github.com/assimp/assimp), and it's all drawn with SDL_GPU.
 
 ## Supported formats
 
-Everything OpenCascade can import:
-
 | Format | Extensions | Notes |
 |---|---|---|
-| STEP | `.step` `.stp` `.stpz` | names, colors, transparency, assemblies |
+| STEP | `.step` `.stp` `.stpz` | assemblies, names, colors, transparency |
 | IGES | `.iges` `.igs` | |
-| STL | `.stl` | mesh only |
-| OBJ | `.obj` | mesh only, assumed to be in millimeters |
-| glTF | `.gltf` `.glb` | mesh only, Draco compressed files aren't supported |
-| VRML | `.wrl` `.vrml` | mesh only, units are taken as-is (KiCad models are in 0.1" units) |
 | OpenCascade BREP | `.brep` | |
 | OpenCascade XCAF | `.xbf` | |
+| glTF | `.gltf` `.glb` `.vrm` | PBR materials, textures (PNG, JPEG, WebP), texture transforms, Draco compressed meshes |
+| Autodesk FBX | `.fbx` | |
+| Wavefront OBJ | `.obj` | materials and textures from the `.mtl`, assumed to be in millimeters |
+| Collada | `.dae` `.zae` `.xml` | |
+| STL | `.stl` | assumed to be in millimeters |
+| 3MF | `.3mf` | |
+| AMF | `.amf` | |
+| Stanford PLY | `.ply` | |
+| VRML | `.wrl` `.vrml` | units are taken as-is (KiCad models are in 0.1" units) |
+| X3D | `.x3d` `.x3db` | |
+| 3D Studio | `.3ds` `.prj` | |
+| LightWave | `.lwo` `.lxo` `.lws` `.mot` | |
+| DirectX | `.x` | |
+| Industry Foundation Classes (IFC) | `.ifc` `.ifczip` | |
+| AutoCAD DXF | `.dxf` | 3D faces only |
+| AC3D | `.ac` `.acc` `.ac3d` | |
+| 3ds Max ASE | `.ase` `.ask` | |
+| Milkshape 3D | `.ms3d` | |
+| Blitz3D | `.b3d` | |
+| Quake / Doom models | `.md2` `.md3` `.md5mesh` `.mdc` `.mdl` | |
+| Quake III BSP | `.bsp` `.pk3` | |
+| Inter-Quake Model | `.iqm` | |
+| Unreal | `.3d` `.uc` | |
+| Valve SMD | `.smd` `.vta` | |
+| Ogre | `.mesh` `.mesh.xml` | |
+| OpenGEX | `.ogex` | |
+| Irrlicht | `.irr` `.irrmesh` | |
+| MikuMikuDance | `.pmx` | |
+| Neutral File Format | `.nff` `.enff` | |
+| Object File Format | `.off` | |
+| trueSpace | `.cob` `.scn` | |
+| Nendo | `.ndo` | |
+| Quick3D | `.q3o` `.q3s` | |
+| Silo | `.sib` | |
+| XGL | `.xgl` `.zgl` | |
+| Raw triangles | `.raw` | |
+| 3D GameStudio heightmap | `.hmp` | |
+| Terragen heightmap | `.ter` | |
+| Assimp binary | `.assbin` | |
+
+Blender files aren't supported (export glTF from Blender instead).
+
+Motion capture and animation files (`.bvh`, `.csm`, `.md5anim`, `.md5camera`) open too, but they have no geometry to show.
+
+Everything is converted to millimeters with Z up. Formats with units (glTF, FBX, Collada etc) are scaled, others are assumed to be in millimeters. Y up formats (glTF, FBX, OBJ, PLY...) are turned so their front faces the front of the default view.
+
+## Shading
+
+**CAD** shading draws everything in its own color with a light from the camera. **Realistic** shading uses physically based (metallic/roughness) materials lit by a built in studio environment (sky gradient, floor and soft box lights) with blurrier reflections on rougher surfaces, and tone mapping.
+
+Files with real materials (glTF, or anything with textures) are always shaded realistically: base color, metallic/roughness, normal, occlusion and emissive textures, and opaque/mask/blend alpha. For files which just have colors (STEP etc) it's a choice on the toolbar or in the settings: `[CAD|Realistic]`, where realistic shading treats every color as a slightly rough plastic.
 
 Mesh formats have no CAD edges, so the sharp ones (where the surface bends by more than 35 degrees, and open boundaries) are drawn instead. If the file has no normals, they're smoothed only across angles under 35 degrees so sharp edges stay sharp.
 
@@ -47,7 +92,15 @@ Rotation is turntable (Z stays up) by default, trackball (free rotation) is in t
 
 View > Settings... opens the settings window (projection, rotation style, grid, selection tint, zoom...). Changes take effect straight away; **Revert** goes back to how things were when the window was opened and **Defaults** resets everything.
 
-Settings (and the window position) are saved in `~/3DViewer.settings` (`%USERPROFILE%DViewer.settings` on Windows).
+Settings (and the window position) are saved in `~/3DViewer.settings` (`%USERPROFILE%\3DViewer.settings` on Windows).
+
+## Testing
+
+`models/` has a small set of test files covering every format and feature, see [models/README.md](models/README.md). To check they all load as expected (no window, about a second):
+
+```
+step_viewer --check models
+```
 
 ## Build Instructions
 
@@ -197,9 +250,15 @@ The first configure pulls down a handful of dependencies via CMake FetchContent 
 
 OpenCascade (OCCT 8.0.1) is built from source as part of the **first configure** - see `cmake/occt.cmake`. Expect that configure to take 10-20 minutes; progress goes to log files in `<build dir>/_occt`. After that it's skipped unless something relevant changes (OCCT version, compiler, build type or runtime library).
 
-Only the toolkits needed for importing models and meshing them are built, as static libraries. RapidJSON (for glTF) is fetched as well.
+Only the toolkits needed for importing the CAD formats and meshing them are built, as static libraries.
 
 - With MSVC, OCCT is built to match the configuration (Debug/Release) because the runtimes are incompatible. Visual Studio (multi-config) builds both.
 - Everywhere else OCCT is always built in Release, including for Debug builds of the app.
 
 OCCT is licensed under the LGPL 2.1 with an additional exception. Because it is linked statically here, check the [licensing terms](https://dev.opencascade.org/resources/licensing) before distributing binaries.
+
+## Other libraries
+
+- Assimp (BSD license) is built as part of the normal build, import only, with its own zlib and Draco (compressed glTF meshes).
+- libwebp decodes WebP textures, stb_image the rest.
+- SDL's D3D12 backend is patched so that lots of texture bindings in one frame don't overflow its descriptor heaps, see `cmake/patch_sdl.cmake`.

@@ -28,18 +28,18 @@ LOG_CONTEXT("step_viewer", info);
 
 namespace
 {
-    // everything OCCT can import
-    nfdu8filteritem_t const step_file_filters[] = {
-        { "All supported files", "step,stp,stpz,iges,igs,stl,obj,gltf,glb,wrl,vrml,brep,xbf" },
-        { "STEP", "step,stp,stpz" },
-        { "IGES", "iges,igs" },
-        { "STL", "stl" },
-        { "OBJ", "obj" },
-        { "glTF", "gltf,glb" },
-        { "VRML", "wrl,vrml" },
-        { "OpenCascade BREP", "brep" },
-        { "OpenCascade XCAF", "xbf" },
-    };
+    // everything which can be loaded (OpenCascade and Assimp), as "step,stp,..."
+    std::string const &supported_file_spec()
+    {
+        static std::string const spec = [] {
+            std::string result;
+            for(std::string const &extension : supported_file_extensions()) {
+                result += (result.empty() ? "" : ",") + extension;
+            }
+            return result;
+        }();
+        return spec;
+    }
 
 }    // namespace
 
@@ -603,6 +603,8 @@ void step_viewer::on_closed()
         loader.join();
     }
     model.reset();
+    loaded_model.reset();
+    loaded_textures.release();    // before the device goes
     save_settings(settings_path());
     NFD_Quit();
     gpu_window::on_closed();
@@ -726,6 +728,7 @@ void step_viewer::open_file(std::filesystem::path const &path)
     {
         std::lock_guard _(loaded_mutex);
         loaded_model.reset();
+        loaded_textures.release();
         load_error.clear();
         load_finished = false;
     }
@@ -736,10 +739,17 @@ void step_viewer::open_file(std::filesystem::path const &path)
 
     loader = std::jthread([this, path](std::stop_token stop) {
         auto result = load_step_model(path, stop, load_progress);
+
+        // big textures take a while to upload, do it here rather than stalling the main thread
+        model_renderer::texture_set textures;
+        if(result.has_value() && !stop.stop_requested()) {
+            textures = renderer.upload_textures(*result.value(), stop);
+        }
         {
             std::lock_guard _(loaded_mutex);
             if(result.has_value()) {
                 loaded_model = std::move(result.value());
+                loaded_textures = std::move(textures);
             } else {
                 load_error = result.error();
             }
@@ -771,7 +781,7 @@ void step_viewer::check_loaded()
         model = std::move(loaded_model);
         isolated = false;
         select_node(-1, false);
-        renderer.set_model(*model);
+        renderer.set_model(*model, std::move(loaded_textures));
         cam.scene_radius = (float)model->radius;
         reset_view();
         model->edges = {};    // vertices/indices are kept for picking
@@ -868,7 +878,8 @@ void step_viewer::file_open()
 std::expected<std::filesystem::path, std::error_code> step_viewer::load_file_dialog()
 {
     nfdu8char_t *path;
-    nfdresult_t result = NFD_OpenDialogU8(&path, step_file_filters, (nfdfiltersize_t)std::size(step_file_filters), nullptr);
+    nfdu8filteritem_t const filters[] = { { "All supported files", supported_file_spec().c_str() } };
+    nfdresult_t result = NFD_OpenDialogU8(&path, filters, (nfdfiltersize_t)std::size(filters), nullptr);
     switch(result) {
     case NFD_OKAY: {
         std::filesystem::path p{ reinterpret_cast<char8_t const *>(path) };
@@ -913,6 +924,22 @@ void step_viewer::default_settings()
 }
 
 //////////////////////////////////////////////////////////////////////
+
+void step_viewer::shading_control(char const *label, char const *cad, char const *realistic)
+{
+    if(model != nullptr && model->has_pbr_materials) {
+        bool always = true;
+        ImGui::BeginDisabled();
+        SegmentedControl(label, &always, cad, realistic);
+        ImGui::EndDisabled();
+        ImGui::SetItemTooltip("This model has its own materials, it's always shaded realistically");
+    } else {
+        SegmentedControl(label, &settings.realistic_shading, cad, realistic);
+        ImGui::SetItemTooltip("CAD (flat colors, headlight) or realistic (materials, studio lighting) shading");
+    }
+}
+
+//////////////////////////////////////////////////////////////////////
 // Changes take effect immediately (everything reads the settings every frame),
 // so there's no Apply, just Revert (to how they were when the dialog opened),
 // Defaults and Close. Settings are saved when it closes.
@@ -938,6 +965,9 @@ void step_viewer::settings_ui()
         ImGui::SeparatorText("Appearance");
         ImGui::ColorEdit3("Background", (float *)settings.background_color, ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_NoInputs);
         ImGui::Checkbox("Edges", &settings.show_edges);
+        shading_control("Shading", "CAD", "Realistic");
+        ImGui::SliderFloat("Exposure", &settings.exposure, 0.25f, 4.0f, "%.2f", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp);
+        ImGui::SetItemTooltip("Brightness of realistic shading");
         ImGui::Checkbox("Toolbar", &settings.view_toolbar);
         ImGui::Checkbox("Tree", &settings.view_tree);
         ImGui::Checkbox("Info", &settings.view_info);
@@ -1248,6 +1278,8 @@ void step_viewer::ui()
             ImGui::Checkbox("Axes", &settings.show_axes);
             ImGui::SetItemTooltip("Show the X, Y and Z axes (X)");
             ImGui::SameLine();
+            shading_control("##shading", "CAD", "Realistic");
+            ImGui::SameLine();
             SegmentedControl("##projection", &settings.orthographic, "Persp", "Ortho");
             ImGui::SetItemTooltip("Perspective or orthographic projection");
             ImGui::SameLine();
@@ -1478,6 +1510,8 @@ void step_viewer::gpu_render()
     params.projection = cam.projection_matrix(aspect);
     params.eye = cam.eye();
     params.show_edges = settings.show_edges;
+    params.realistic = model != nullptr && (model->has_pbr_materials || settings.realistic_shading);
+    params.exposure = settings.exposure;
     std::copy((float const *)settings.selection_color, (float const *)settings.selection_color + 4, params.selection_tint);
     params.parts = model != nullptr ? &model->parts : nullptr;
     params.selected_parts = &selected_parts;

@@ -43,9 +43,20 @@ struct pick_hit
     float distance;
 };
 
+// a run of triangles (within a part) which all use the same material
+
+struct step_batch
+{
+    uint32_t first_index{};
+    uint32_t num_indices{};
+    int material{};
+    int part{};
+};
+
 // a part instance's geometry within the model's vertices/indices/edges
 // opaque triangles are in one range, transparent ones (if any) in another
 // parts are in order, so each kind of range goes up from one part to the next
+// each range is split into batches by material (consecutive in step_model::batches)
 
 struct step_part
 {
@@ -54,6 +65,10 @@ struct step_part
     uint32_t num_indices{};
     uint32_t first_transparent_index{};
     uint32_t num_transparent_indices{};
+    uint32_t first_batch{};
+    uint32_t num_batches{};
+    uint32_t first_transparent_batch{};
+    uint32_t num_transparent_batches{};
     uint32_t first_edge_vertex{};
     uint32_t num_edge_vertices{};
     gpu::vec3 bounds_min{};
@@ -69,7 +84,38 @@ struct mesh_vertex
 {
     float position[3];
     float normal[3];
-    uint32_t color;    // RGBA8 (R in the low byte)
+    float uv[2];       // texture coordinates (0,0 = top left of the image)
+    uint32_t color;    // RGBA8 sRGB (R in the low byte), the base color (factor) for realistic shading
+};
+
+//////////////////////////////////////////////////////////////////////
+// Materials for realistic (PBR, metallic/roughness) shading. CAD colors
+// end up in the vertex colors with the default material (index 0)
+
+struct step_texture
+{
+    uint32_t width{};
+    uint32_t height{};
+    bool srgb{};                    // color (base color, emissive) rather than data
+    std::vector<uint8_t> pixels;    // RGBA8, top row first (freed once it's on the GPU)
+};
+
+struct step_material
+{
+    // the base color factor is in the vertex colors
+    float emissive[3]{};
+    float metallic{ 0 };
+    float roughness{ 0.5f };
+    float alpha_cutoff{ 0 };    // alpha mask: discard below this (0 = not masked)
+    bool blend{ false };        // alpha blended (transparent)
+    bool opaque{ false };       // ignore alpha completely
+
+    // indices into step_model::textures, -1 for none
+    int base_color_texture{ -1 };
+    int metallic_roughness_texture{ -1 };    // G = roughness, B = metallic
+    int normal_texture{ -1 };
+    int occlusion_texture{ -1 };             // R
+    int emissive_texture{ -1 };
 };
 
 struct edge_vertex
@@ -97,6 +143,17 @@ struct step_model
     std::vector<mesh_vertex> vertices;
     std::vector<uint32_t> indices;
     uint32_t num_opaque_indices{};
+
+    // all the opaque batches (in index order), then the transparent ones
+    std::vector<step_batch> batches;
+    uint32_t num_opaque_batches{};
+
+    // materials[0] is the default (for CAD colors)
+    std::vector<step_material> materials;
+    std::vector<step_texture> textures;
+
+    // the file has real materials (glTF etc), always shade it realistically
+    bool has_pbr_materials{ false };
 
     // edges (line list)
     std::vector<edge_vertex> edges;
@@ -137,7 +194,11 @@ private:
 };
 
 //////////////////////////////////////////////////////////////////////
-// Load a STEP file and mesh it. Blocking, call it from a worker thread.
+// Load a model (STEP, glTF, FBX, OBJ...) and mesh it. Blocking, call it from a worker thread.
 // progress is updated (0..1) as it goes, stop_token cancels it.
+// CAD formats are loaded with OpenCascade, mesh formats with Assimp
 
 std::expected<std::unique_ptr<step_model>, std::string> load_step_model(std::filesystem::path const &path, std::stop_token stop, std::atomic<float> &progress);
+
+// every file extension which can be loaded (lower case, no dot)
+std::vector<std::string> supported_file_extensions();

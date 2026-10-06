@@ -7,12 +7,11 @@
 # here and built + installed as a separate CMake project at configure time,
 # then consumed via the OpenCASCADEConfig.cmake package it installs.
 #
-# Only the toolkits needed to import models (STEP, IGES, STL, OBJ, glTF,
-# VRML, BREP, XBF - with names/colors via XCAF) and mesh them are built,
-# as static libraries. TKXCAF depends on TKV3d/TKService (Visualization)
-# so those come along too, but without OpenGL, FreeType or X11.
-# glTF needs RapidJSON (header only, fetched here). Draco compressed glTF
-# isn't supported.
+# Only the toolkits needed to import models (STEP, IGES, STL, VRML, BREP,
+# XBF - with names/colors via XCAF) and mesh them are built, as static
+# libraries. TKXCAF depends on TKV3d/TKService (Visualization) so those
+# come along too, but without OpenGL, FreeType or X11. The mesh formats
+# (glTF, OBJ etc) are loaded with Assimp instead.
 #
 # The first configure takes a long time (it's compiling OCCT). After that a
 # stamp file short-circuits it unless something relevant changes.
@@ -37,19 +36,8 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(occt)
 
-# RapidJSON for the glTF reader, master because the last release (2016) doesn't build with current compilers
-FetchContent_Declare(
-        rapidjson
-        URL https://github.com/Tencent/rapidjson/archive/24b5e7a8b27f42fa16b96fc70aade9106cf7102f.tar.gz
-        URL_HASH SHA256=2d2601a82d2d3b7e143a3c8d43ef616671391034bc46891a9816b79cf2d3e7a8
-        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-        SOURCE_SUBDIR .dummy    # just download it
-)
-
-FetchContent_MakeAvailable(rapidjson)
-
 # Toolkits we ask for, OCCT pulls in their dependencies
-set(OCCT_TOOLKITS TKDESTEP TKDEIGES TKDESTL TKDEOBJ TKDEGLTF TKDEVRML TKDECascade TKXCAF TKMesh)
+set(OCCT_TOOLKITS TKDESTEP TKDEIGES TKDESTL TKDEVRML TKDECascade TKXCAF TKMesh)
 
 set(OCCT_ROOT "${CMAKE_BINARY_DIR}/_occt")
 set(OCCT_INSTALL_DIR "${OCCT_ROOT}/install")
@@ -116,8 +104,7 @@ set(_occt_args
         -DUSE_TBB=OFF
         -DUSE_VTK=OFF
         -DUSE_DRACO=OFF
-        -DUSE_RAPIDJSON=ON
-        "-D3RDPARTY_RAPIDJSON_INCLUDE_DIR=${rapidjson_SOURCE_DIR}/include"
+        -DUSE_RAPIDJSON=OFF
         -DUSE_FFMPEG=OFF
         -DUSE_OPENVR=OFF
         -DUSE_EIGEN=OFF
@@ -240,5 +227,9 @@ target_link_libraries(occt INTERFACE ${OCCT_LIBRARIES})
 
 # Standard_EXPORT is dllimport on Windows unless this is defined
 target_compile_definitions(occt INTERFACE OCCT_STATIC_BUILD)
+
+# every toolkit which was built, for tools (the imported targets are only visible in this directory)
+add_library(occt_all INTERFACE)
+target_link_libraries(occt_all INTERFACE occt ${OpenCASCADE_LIBRARIES})
 
 message(STATUS "OCCT: ${OpenCASCADE_MAJOR_VERSION}.${OpenCASCADE_MINOR_VERSION}.${OpenCASCADE_MAINTENANCE_VERSION} from ${OCCT_INSTALL_DIR}")

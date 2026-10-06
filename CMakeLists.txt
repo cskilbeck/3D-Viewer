@@ -160,5 +160,9 @@ include(compile_options)
 add_subdirectory(third_party)
 add_subdirectory(step_viewer)
 
+# makes the CAD test models (not built by default): cmake --build <dir> --target make_cad_models
+add_executable(make_cad_models EXCLUDE_FROM_ALL tools/make_cad_models.cpp)
+target_link_libraries(make_cad_models PRIVATE occt_all)
+
 set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT step_viewer)
 set_property(TARGET step_viewer PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")

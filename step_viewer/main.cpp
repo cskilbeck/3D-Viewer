@@ -13,9 +13,11 @@
 // transparency
 //
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -23,6 +25,7 @@
 #include <fcntl.h>
 #endif
 
+#include "model_check.h"
 #include "step_viewer.h"
 
 LOG_CONTEXT("main", info);
@@ -46,28 +49,29 @@ int output_debug_string(char const *s)
 #endif
 
 //////////////////////////////////////////////////////////////////////
-// first command line argument, if there is one, is a file to open
+// the command line arguments (not the program name) as paths
 
-std::filesystem::path command_line_file(int argc, char **argv)
+std::vector<std::filesystem::path> command_line_args(int argc, char **argv)
 {
+    std::vector<std::filesystem::path> args;
 #ifdef _WIN32
     // argv is in the ANSI codepage, get the wide version for non-ascii paths
+    (void)argc;
+    (void)argv;
     int wargc;
     LPWSTR *wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
-    std::filesystem::path path;
     if(wargv != nullptr) {
-        if(wargc > 1) {
-            path = wargv[1];
+        for(int i = 1; i < wargc; ++i) {
+            args.emplace_back(wargv[i]);
         }
         LocalFree(wargv);
     }
-    return path;
 #else
-    if(argc > 1) {
-        return argv[1];
+    for(int i = 1; i < argc; ++i) {
+        args.emplace_back(argv[i]);
     }
-    return {};
 #endif
+    return args;
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -82,7 +86,10 @@ int main(int argc, char **argv)
 
 #ifdef _WIN32
     if(!IsDebuggerPresent()) {
-        if(AttachConsole(ATTACH_PARENT_PROCESS)) {
+        // a GUI app has no console: use the parent's, unless output is already going somewhere (a pipe or a file)
+        HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+        bool has_stdout = out != nullptr && out != INVALID_HANDLE_VALUE && GetFileType(out) != FILE_TYPE_UNKNOWN;
+        if(!has_stdout && AttachConsole(ATTACH_PARENT_PROCESS)) {
             FILE *dummy;
             freopen_s(&dummy, "CONOUT$", "w", stdout);
             freopen_s(&dummy, "CONOUT$", "w", stderr);
@@ -100,12 +107,24 @@ int main(int argc, char **argv)
     logging::log_set_emitter_function(puts);
 #endif
 
+    std::vector<std::filesystem::path> args = command_line_args(argc, argv);
+
+    // --check <directory> [--update]: test loading the models, no window
+    if(!args.empty() && args[0] == "--check") {
+        logging::log_set_level(logging::log_level_error);
+        bool update = std::find(args.begin(), args.end(), std::filesystem::path("--update")) != args.end();
+        std::filesystem::path directory = args.size() > 1 && args[1] != "--update" ? args[1] : std::filesystem::path("models");
+        int result = check_models(directory, update);
+        fflush(stdout);
+        std::quick_exit(result);
+    }
+
     step_viewer window;
     window.init();
 
-    std::filesystem::path file = command_line_file(argc, argv);
-    if(!file.empty()) {
-        window.open_file(file);
+    // the first argument, if there is one, is a file to open
+    if(!args.empty()) {
+        window.open_file(args[0]);
     }
 
     while(window.update()) {}

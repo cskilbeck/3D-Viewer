@@ -142,6 +142,7 @@ struct step_viewer : gpu_window
     // loader thread hands the result over via these
     std::mutex loaded_mutex;
     std::unique_ptr<step_model> loaded_model;
+    model_renderer::texture_set loaded_textures;    // uploaded by the loader thread
     std::string load_error;
     bool load_finished{ false };
 
@@ -161,6 +162,9 @@ struct step_viewer : gpu_window
     void revert_settings();
     void default_settings();
     void settings_ui();
+
+    // [CAD|Realistic], fixed on Realistic for models with their own materials
+    void shading_control(char const *label, char const *cad, char const *realistic);
 
     // "Loading <file>" + progress bar, goes in the Info window, or the toolbar, or its own window
     std::string loading_text() const;

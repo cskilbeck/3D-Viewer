@@ -1,10 +1,13 @@
 //////////////////////////////////////////////////////////////////////
 // Draws a step_model with SDL_GPU: shaded triangles + edges, plus a grid and axes
 // Depth is reversed (near = 1, far = 0) for precision
+// Shading is either CAD (vertex colors with a headlight) or realistic (PBR materials
+// and textures lit by a built in studio environment)
 
 #pragma once
 
 #include <cstdint>
+#include <stop_token>
 #include <vector>
 
 #include <SDL3/SDL.h>
@@ -14,6 +17,7 @@
 
 struct step_model;
 struct step_part;
+struct step_batch;
 
 struct model_renderer
 {
@@ -25,8 +29,28 @@ struct model_renderer
     bool init(gpu::device &dev, SDL_GPUTextureFormat swapchain_format);
     void cleanup();
 
-    // upload the model's geometry (call on the main thread)
-    void set_model(step_model const &model);
+    // A model's textures on the GPU. Big textures take a while to upload, so the loader
+    // thread does it (SDL_GPU allows that) and set_model() takes them over. They're
+    // released if that doesn't happen
+    struct texture_set
+    {
+        SDL_GPUDevice *gpu{};
+        std::vector<SDL_GPUTexture *> textures;    // by step_model::textures index, null if it failed
+
+        texture_set() = default;
+        texture_set(texture_set const &) = delete;
+        texture_set &operator=(texture_set const &) = delete;
+        texture_set(texture_set &&other) noexcept;
+        texture_set &operator=(texture_set &&other) noexcept;
+        ~texture_set();
+        void release();
+    };
+
+    // upload the model's textures (any thread) and free their pixels
+    texture_set upload_textures(step_model &model, std::stop_token stop) const;
+
+    // upload the model's geometry and take over its textures (call on the main thread)
+    void set_model(step_model const &model, texture_set &&model_textures);
     void clear_model();
 
     bool has_model() const
@@ -42,6 +66,8 @@ struct model_renderer
         gpu::mat4 projection;
         gpu::vec3 eye;    // for sorting transparent parts
         bool show_edges;
+        bool realistic;    // PBR rather than CAD shading
+        float exposure;    // realistic shading brightness
         float selection_tint[4];                // rgb + strength
         std::vector<step_part> const *parts;    // so selected parts can be found
         std::vector<int> const *selected_parts;
@@ -68,10 +94,18 @@ struct model_renderer
     SDL_GPUGraphicsPipeline *mesh_pipeline{};
     SDL_GPUGraphicsPipeline *transparent_back_pipeline{};     // back faces of transparent parts
     SDL_GPUGraphicsPipeline *transparent_front_pipeline{};    // then their front faces
+    SDL_GPUGraphicsPipeline *pbr_pipeline{};                  // realistic versions of the same 3
+    SDL_GPUGraphicsPipeline *pbr_transparent_back_pipeline{};
+    SDL_GPUGraphicsPipeline *pbr_transparent_front_pipeline{};
     SDL_GPUGraphicsPipeline *edge_pipeline{};
     SDL_GPUGraphicsPipeline *grid_pipeline{};
 
     SDL_GPUBuffer *grid_buffer{};    // a -1..1 square
+
+    // for materials without some textures
+    SDL_GPUTexture *white_texture{};
+    SDL_GPUTexture *flat_normal_texture{};
+    SDL_GPUSampler *sampler{};
 
     // render targets, recreated when the size changes
     SDL_GPUTexture *msaa_texture{};
@@ -87,6 +121,21 @@ struct model_renderer
     uint32_t num_indices{};
     uint32_t num_opaque_indices{};
     uint32_t num_edge_vertices{};
+
+    // realistic shading
+    static constexpr int num_material_textures = 5;    // base color, metallic/roughness, normal, occlusion, emissive
+
+    struct gpu_material
+    {
+        float emissive[4];    // w = alpha mode, see pbr.frag
+        float params[4];      // metallic, roughness, has normal map
+        SDL_GPUTexture *textures[num_material_textures];
+    };
+
+    std::vector<SDL_GPUTexture *> textures;
+    std::vector<gpu_material> materials;
+    std::vector<step_batch> batches;
+    uint32_t num_opaque_batches{};
 
 private:
     void create_targets(uint32_t width, uint32_t height);

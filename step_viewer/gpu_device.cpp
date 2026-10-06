@@ -1,6 +1,7 @@
 //////////////////////////////////////////////////////////////////////
 // SDL_GPU device wrapper
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 
@@ -74,7 +75,7 @@ namespace gpu
 
     //////////////////////////////////////////////////////////////////////
 
-    SDL_GPUShader *device::load_shader(char const *shader_name, SDL_GPUShaderStage stage, int num_uniform_buffers)
+    SDL_GPUShader *device::load_shader(char const *shader_name, SDL_GPUShaderStage stage, int num_uniform_buffers, int num_samplers)
     {
         std::string resource_name = std::string(shader_name) + shader_extension;
         auto fs = cmrc::my_shaders::get_filesystem();
@@ -91,6 +92,7 @@ namespace gpu
         ci.format = shader_format;
         ci.stage = stage;
         ci.num_uniform_buffers = num_uniform_buffers;
+        ci.num_samplers = num_samplers;
 
         SDL_GPUShader *shader = SDL_CreateGPUShader(gpu, &ci);
         if(!shader) {
@@ -140,6 +142,74 @@ namespace gpu
         // safe to release now, SDL keeps it alive until the copy is done
         SDL_ReleaseGPUTransferBuffer(gpu, transfer);
         return buffer;
+    }
+
+    //////////////////////////////////////////////////////////////////////
+
+    SDL_GPUTexture *device::create_texture(void const *pixels, uint32_t width, uint32_t height, bool srgb, bool mipmaps, char const *name)
+    {
+        SDL_GPUTextureFormat format = srgb ? SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB : SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+
+        // generating mipmaps renders into them
+        uint32_t num_levels = 1;
+        if(mipmaps && SDL_GPUTextureSupportsFormat(gpu, format, SDL_GPU_TEXTURETYPE_2D, SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET)) {
+            for(uint32_t size = std::max(width, height); size > 1; size >>= 1) {
+                num_levels += 1;
+            }
+        }
+
+        SDL_GPUTextureCreateInfo ci{};
+        ci.type = SDL_GPU_TEXTURETYPE_2D;
+        ci.format = format;
+        ci.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | (num_levels > 1 ? SDL_GPU_TEXTUREUSAGE_COLOR_TARGET : 0);
+        ci.width = width;
+        ci.height = height;
+        ci.layer_count_or_depth = 1;
+        ci.num_levels = num_levels;
+        ci.props = SDL_CreateProperties();
+        SDL_SetStringProperty(ci.props, SDL_PROP_GPU_TEXTURE_CREATE_NAME_STRING, name);
+        SDL_GPUTexture *texture = SDL_CreateGPUTexture(gpu, &ci);
+        SDL_DestroyProperties(ci.props);
+        if(texture == nullptr) {
+            LOG_ERROR("SDL_CreateGPUTexture failed for '{}' ({}x{}): {}", name, width, height, SDL_GetError());
+            return nullptr;
+        }
+
+        uint32_t size = width * height * 4;
+        SDL_GPUTransferBufferCreateInfo tci{};
+        tci.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+        tci.size = size;
+        SDL_GPUTransferBuffer *transfer = SDL_CreateGPUTransferBuffer(gpu, &tci);
+        if(transfer == nullptr) {
+            LOG_ERROR("SDL_CreateGPUTransferBuffer failed ({} bytes): {}", size, SDL_GetError());
+            SDL_ReleaseGPUTexture(gpu, texture);
+            return nullptr;
+        }
+
+        void *mapped = SDL_MapGPUTransferBuffer(gpu, transfer, false);
+        memcpy(mapped, pixels, size);
+        SDL_UnmapGPUTransferBuffer(gpu, transfer);
+
+        SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(gpu);
+        SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(cmd);
+        SDL_GPUTextureTransferInfo src{};
+        src.transfer_buffer = transfer;
+        src.pixels_per_row = width;
+        src.rows_per_layer = height;
+        SDL_GPUTextureRegion dst{};
+        dst.texture = texture;
+        dst.w = width;
+        dst.h = height;
+        dst.d = 1;
+        SDL_UploadToGPUTexture(copy, &src, &dst, false);
+        SDL_EndGPUCopyPass(copy);
+        if(num_levels > 1) {
+            SDL_GenerateMipmapsForGPUTexture(cmd, texture);
+        }
+        SDL_SubmitGPUCommandBuffer(cmd);
+
+        SDL_ReleaseGPUTransferBuffer(gpu, transfer);
+        return texture;
     }
 
     //////////////////////////////////////////////////////////////////////

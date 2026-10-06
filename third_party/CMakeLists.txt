@@ -11,10 +11,13 @@ endif()
 ######################################################################
 # SDL3
 
+# patched: D3D12 descriptor heap overflow with lots of texture bindings, see cmake/patch_sdl.cmake
 FetchContent_Declare(
         SDL3
         GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
-        GIT_TAG release-3.4.8)
+        GIT_TAG release-3.4.8
+        PATCH_COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_LIST_DIR}/../cmake/patch_sdl.cmake
+        UPDATE_DISCONNECTED TRUE)
 
 set(SDL_SHARED OFF CACHE BOOL "" FORCE)
 set(SDL_STATIC ON CACHE BOOL "" FORCE)
@@ -117,6 +120,60 @@ add_library(stb_image INTERFACE)
 target_include_directories(stb_image INTERFACE ${stb_SOURCE_DIR})
 
 ######################################################################
+# libwebp (just the decoder, for glTF WebP textures)
+
+FetchContent_Declare(
+        libwebp
+        GIT_REPOSITORY https://github.com/webmproject/libwebp.git
+        GIT_TAG v1.5.0
+        GIT_SHALLOW TRUE
+)
+
+foreach(_webp_option ANIM_UTILS CWEBP DWEBP GIF2WEBP IMG2WEBP VWEBP WEBPINFO WEBPMUX EXTRAS LIBWEBPMUX FUZZTEST)
+    set(WEBP_BUILD_${_webp_option} OFF CACHE BOOL "" FORCE)
+endforeach()
+
+FetchContent_MakeAvailable(libwebp)
+
+set(WEBP_INCLUDE_DIR "${libwebp_SOURCE_DIR}/src")
+
+######################################################################
+# Assimp, for mesh formats (glTF, FBX, OBJ, DAE, 3MF...), OpenCascade does the CAD ones
+# Import only, static, with its own zlib and Draco (for compressed glTF)
+
+FetchContent_Declare(
+        assimp
+        GIT_REPOSITORY https://github.com/assimp/assimp.git
+        GIT_TAG v6.0.5
+        GIT_SHALLOW TRUE
+)
+
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_ASSIMP_TOOLS OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_SAMPLES OFF CACHE BOOL "" FORCE)
+set(ASSIMP_NO_EXPORT ON CACHE BOOL "" FORCE)
+set(ASSIMP_INSTALL OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_ZLIB ON CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_DRACO ON CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_DRACO_STATIC ON CACHE BOOL "" FORCE)
+set(ASSIMP_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
+set(ASSIMP_INJECT_DEBUG_POSTFIX OFF CACHE BOOL "" FORCE)
+
+# The Blender importer is deprecated and can't read anything from Blender 3.0 on (zstd
+# compression, then new mesh storage and file header), export glTF from Blender instead
+set(ASSIMP_BUILD_BLEND_IMPORTER OFF CACHE BOOL "" FORCE)
+
+# Draco's cmake_minimum_required predates CMP0091, which it needs to use the same runtime library as us
+set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
+FetchContent_MakeAvailable(assimp)
+unset(CMAKE_POLICY_DEFAULT_CMP0091)
+
+# Draco generates draco/draco_features.h in the top level build directory, which Assimp
+# only includes when it's the top level project
+target_include_directories(assimp PRIVATE "${CMAKE_BINARY_DIR}")
+
+######################################################################
 # OpenCascade (built at configure time, see cmake/occt.cmake)
 
 include(../cmake/occt.cmake)
@@ -144,5 +201,10 @@ target_link_libraries(third_party INTERFACE
         nfd
         nlohmann_json::nlohmann_json
         stb_image
+        webpdecoder
+        assimp
         occt
 )
+
+# webp/decode.h (libwebp's own include directories are only for building it)
+target_include_directories(third_party INTERFACE "${WEBP_INCLUDE_DIR}")
