@@ -40,7 +40,13 @@ namespace settings
     X(bool, view_toolbar, true)                                    \
     X(bool, view_tree, true)                                       \
     X(bool, view_info, true)                                       \
-    X(bool, show_edges, true)                                          X(bool, realistic_shading, false)                                  X(float, exposure, 1.0f)                                           X(int, transparency, 1)                                            X(int, transparency_layers, 8)                                 \
+    X(bool, show_edges, true)                                      \
+    X(float, edge_width, 1.5f)                                     \
+    X(bool, realistic_shading, false)                              \
+    X(float, exposure, 1.0f)                                       \
+    X(int, antialiasing, 2)                                        \
+    X(int, transparency, 1)                                        \
+    X(int, transparency_layers, 8)                                 \
     X(settings::color_t, selection_color, { 1.0f, 0.85f, 0.0f, 0.6f }) \
     X(float, fit_border, 0.08f)                                    \
     X(float, fit_duration, 0.4f)                                   \

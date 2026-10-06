@@ -313,7 +313,7 @@ void RightAlignButtons(const std::vector<const char *> &labels)
 
 //////////////////////////////////////////////////////////////////////
 
-bool SegmentedControl(char const *label, int *value, std::vector<char const *> const &options)
+bool SegmentedControl(char const *label, int *value, std::vector<char const *> const &options, uint32_t disabled)
 {
     bool changed = false;
     ImGui::PushID(label);
@@ -331,10 +331,12 @@ bool SegmentedControl(char const *label, int *value, std::vector<char const *> c
             ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_FrameBg));
             ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
         }
+        ImGui::BeginDisabled((disabled & (1u << i)) != 0);
         if(ImGui::Button(options[i]) && !selected) {
             *value = i;
             changed = true;
         }
+        ImGui::EndDisabled();
         ImGui::PopStyleColor(2);
     }
     ImGui::PopStyleVar();

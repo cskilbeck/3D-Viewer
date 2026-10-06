@@ -79,6 +79,8 @@ struct model_renderer
         gpu::mat4 projection;
         gpu::vec3 eye;    // for sorting transparent things
         bool show_edges;
+        float edge_width;    // pixels
+        float axis_width;
         bool realistic;    // PBR rather than CAD shading
         float exposure;    // realistic shading brightness
         float selection_tint[4];                // rgb + strength
@@ -101,8 +103,13 @@ struct model_renderer
     // clear the whole target to background and draw the model into the viewport
     void render(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *swapchain_texture, uint32_t width, uint32_t height, draw_params const &params);
 
+    // MSAA: samples is 1 (off), 2, 4 or 8, it uses the most the GPU can do up to that
+    void set_samples(int samples);
+    bool sample_count_supported(int samples) const;
+
     // depth peeling needs depth textures which can be sampled and float render targets
     bool peel_supported{ false };
+    bool peel_formats_supported{ false };
 
     gpu::device *dev{};
 
@@ -119,6 +126,7 @@ struct model_renderer
     SDL_GPUGraphicsPipeline *pbr_transparent_front_pipeline{};
     SDL_GPUGraphicsPipeline *pbr_transparent_both_pipeline{};
     SDL_GPUGraphicsPipeline *edge_pipeline{};
+    SDL_GPUGraphicsPipeline *edge_overlay_pipeline{};    // over the depth peeled image (no MSAA)
     SDL_GPUGraphicsPipeline *grid_pipeline{};
 
     // depth peeling
@@ -203,6 +211,10 @@ struct model_renderer
     bool sorted_valid{ false };
 
 private:
+    bool create_pipelines();
+    void release_pipelines();
+    SDL_GPUSampleCount supported_sample_count(int samples) const;
+
     void create_targets(uint32_t width, uint32_t height);
     void release_targets();
     void create_peel_targets(uint32_t width, uint32_t height);
@@ -211,6 +223,7 @@ private:
     void bind_material(SDL_GPUCommandBuffer *cmd, SDL_GPURenderPass *pass, draw_params const &params, int material_index, float const *tint) const;
     void update_sorted(SDL_GPUCommandBuffer *cmd, draw_params const &params, bool realistic);
     void draw_sorted(SDL_GPUCommandBuffer *cmd, SDL_GPURenderPass *pass, draw_params const &params, bool realistic) const;
+    void draw_lines(SDL_GPUCommandBuffer *cmd, SDL_GPURenderPass *pass, draw_params const &params, SDL_GPUGraphicsPipeline *pipeline) const;
     void draw_transparent_parts(SDL_GPUCommandBuffer *cmd, SDL_GPURenderPass *pass, draw_params const &params, bool realistic) const;
     void render_peeled(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *swapchain_texture, draw_params const &params, bool realistic);
 };

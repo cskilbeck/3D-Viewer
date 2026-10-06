@@ -92,7 +92,7 @@ Rotation is turntable (Z stays up) by default, trackball (free rotation) is in t
 
 ## Settings
 
-View > Settings... opens the settings window (projection, rotation style, grid, selection tint, zoom...). Changes take effect straight away; **Revert** goes back to how things were when the window was opened and **Defaults** resets everything.
+View > Settings... opens the settings window (shading, anti-aliasing, transparency, projection, rotation style, grid, selection tint, zoom...). Changes take effect straight away; **Revert** goes back to how things were when the window was opened and **Defaults** resets everything.
 
 Settings (and the window position) are saved in `~/3DViewer.settings` (`%USERPROFILE%\3DViewer.settings` on Windows).
 

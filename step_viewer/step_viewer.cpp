@@ -28,6 +28,14 @@ LOG_CONTEXT("step_viewer", info);
 
 namespace
 {
+    // MSAA samples for each anti-aliasing setting (Off, 2x, 4x, 8x)
+    int const antialiasing_samples[] = { 1, 2, 4, 8 };
+
+    int samples_for(int antialiasing)
+    {
+        return antialiasing_samples[std::clamp(antialiasing, 0, (int)std::size(antialiasing_samples) - 1)];
+    }
+
     // everything which can be loaded (OpenCascade and Assimp), as "step,stp,..."
     std::string const &supported_file_spec()
     {
@@ -956,104 +964,180 @@ void step_viewer::settings_ui()
     ImGuiViewport const *main_viewport = ImGui::GetMainViewport();
     ImVec2 view_center(main_viewport->Pos.x + viewport_xpos + viewport_width * 0.5f, main_viewport->Pos.y + viewport_ypos + viewport_height * 0.5f);
     ImGui::SetNextWindowPos(view_center, ImGuiCond_FirstUseEver, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSizeConstraints(ImVec2(ImGui::GetFontSize() * 26, 0), ImVec2(FLT_MAX, FLT_MAX));
     if(ImGui::Begin("Settings", &still_open, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoCollapse)) {
 
-        float const slider_width = ImGui::GetFontSize() * 12;
-        ImGui::PushItemWidth(slider_width);
+        // two columns, labels on the left and controls on the right, the same widths in every section so they line up
+        float const label_width = ImGui::GetFontSize() * 8;
+        float const control_width = ImGui::GetFontSize() * 14;
 
-        ImGui::SeparatorText("Appearance");
-        ImGui::ColorEdit3("Background", (float *)settings.background_color, ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_NoInputs);
-        ImGui::Checkbox("Edges", &settings.show_edges);
-        shading_control("Shading", "CAD", "Realistic");
-        ImGui::SliderFloat("Exposure", &settings.exposure, 0.25f, 4.0f, "%.2f", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp);
-        ImGui::SetItemTooltip("Brightness of realistic shading");
-        SegmentedControl("Transparency", &settings.transparency, { "None", "Basic", "Advanced" });
-        ImGui::SetItemTooltip("How transparent surfaces are put in order\n\n"
-                              "None: whole parts, furthest first (fastest, often wrong where parts overlap)\n"
-                              "Basic: every triangle, furthest first (mostly right)\n"
-                              "Advanced: depth peeling, exactly right up to the number of layers (slowest)");
-        if(settings.transparency == model_renderer::transparency_peeled) {
-            if(renderer.peel_supported) {
-                ImGui::SliderInt("Layers", &settings.transparency_layers, 2, 16, "%d", ImGuiSliderFlags_AlwaysClamp);
-                ImGui::SetItemTooltip("How many transparent surfaces deep it goes (more is slower)");
-            } else {
-                ImGui::TextDisabled("Not available on this GPU, using Basic");
+        auto begin_section = [&](char const *name) {
+            ImGui::SeparatorText(name);
+            if(!ImGui::BeginTable(name, 2, ImGuiTableFlags_SizingFixedFit)) {
+                return false;
             }
+            ImGui::TableSetupColumn("label", ImGuiTableColumnFlags_WidthFixed, label_width);
+            ImGui::TableSetupColumn("control", ImGuiTableColumnFlags_WidthFixed, control_width);
+            return true;
+        };
+
+        // a row's label, then the next widget goes in the control column (give it a hidden "##" label)
+        auto row = [&](char const *label) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(label);
+            ImGui::TableSetColumnIndex(1);
+            ImGui::SetNextItemWidth(control_width);
+        };
+
+        if(begin_section("Appearance")) {
+            row("Background");
+            ImGui::ColorEdit3("##background", (float *)settings.background_color, ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_NoInputs);
+            row("Edges");
+            ImGui::Checkbox("##edges", &settings.show_edges);
+            ImGui::SetItemTooltip("Show edges (E)");
+            row("Edge thickness");
+            ImGui::SliderFloat("##edge_thickness", &settings.edge_width, 1.0f, 4.0f, "%.1f px", ImGuiSliderFlags_AlwaysClamp);
+            ImGui::SetItemTooltip("How thick the edges are drawn");
+            row("Toolbar");
+            ImGui::Checkbox("##toolbar", &settings.view_toolbar);
+            row("Tree");
+            ImGui::Checkbox("##tree", &settings.view_tree);
+            row("Info");
+            ImGui::Checkbox("##info", &settings.view_info);
+            ImGui::EndTable();
         }
-        ImGui::Checkbox("Toolbar", &settings.view_toolbar);
-        ImGui::Checkbox("Tree", &settings.view_tree);
-        ImGui::Checkbox("Info", &settings.view_info);
 
-        ImGui::SeparatorText("View");
-        SegmentedControl("Projection", &settings.orthographic, "Perspective", "Orthographic");
-        SegmentedControl("Rotation", &settings.trackball, "Turntable", "Trackball");
-        ImGui::SetItemTooltip("Turntable keeps Z pointing up, trackball rotates freely in any direction");
-        ImGui::Checkbox("Axes", &settings.show_axes);
-        ImGui::SetItemTooltip("X, Y and Z axes through the origin (red, green, blue)");
-
-        ImGui::SeparatorText("Grid");
-        ImGui::Checkbox("Show grid", &settings.show_grid);
-        ImGui::SetItemTooltip("Grid on the XY plane");
-        {
-            // the slider snaps to 1, 2, 5, 10, 20, 50... the box takes anything
-            static float const nice_spacings[] = { 0.01f, 0.02f, 0.05f, 0.1f, 0.2f, 0.5f, 1.0f,  2.0f,   5.0f,   10.0f,
-                                                   20.0f, 50.0f, 100.0f, 200.0f, 500.0f, 1000.0f };
-            int const num_spacings = (int)std::size(nice_spacings);
-
-            // nearest (in log terms) to the current value
-            int index = 0;
-            for(int i = 1; i < num_spacings; ++i) {
-                if(std::abs(std::log(nice_spacings[i] / settings.grid_spacing)) < std::abs(std::log(nice_spacings[index] / settings.grid_spacing))) {
-                    index = i;
+        if(begin_section("Rendering")) {
+            row("Shading");
+            shading_control("##shading", "CAD", "Realistic");
+            row("Exposure");
+            ImGui::SliderFloat("##exposure", &settings.exposure, 0.25f, 4.0f, "%.2f", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp);
+            ImGui::SetItemTooltip("Brightness of realistic shading");
+            row("Anti-aliasing");
+            {
+                uint32_t unsupported = 0;
+                for(int i = 0; i < (int)std::size(antialiasing_samples); ++i) {
+                    if(!renderer.sample_count_supported(antialiasing_samples[i])) {
+                        unsupported |= 1u << i;
+                    }
                 }
+                SegmentedControl("##antialiasing", &settings.antialiasing, { "Off", "2x", "4x", "8x" }, unsupported);
+                ImGui::SetItemTooltip("Multisample anti-aliasing: smoother edges, more samples is slower\n"
+                                      "(sample counts this GPU can't do are greyed out)");
+            }
+            row("Transparency");
+            SegmentedControl("##transparency", &settings.transparency, { "None", "Basic", "Advanced" });
+            ImGui::SetItemTooltip("How transparent surfaces are put in order\n\n"
+                                  "None: whole parts, furthest first (fastest, often wrong where parts overlap)\n"
+                                  "Basic: every triangle, furthest first (mostly right)\n"
+                                  "Advanced: depth peeling, exactly right up to the number of layers (slowest)");
+            row("Layers");
+            if(renderer.peel_supported) {
+                ImGui::BeginDisabled(settings.transparency != model_renderer::transparency_peeled);
+                ImGui::SliderInt("##layers", &settings.transparency_layers, 2, 16, "%d", ImGuiSliderFlags_AlwaysClamp);
+                ImGui::EndDisabled();
+                ImGui::SetItemTooltip("How many transparent surfaces deep Advanced transparency goes (more is slower)");
+            } else {
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextDisabled("Advanced isn't available on this GPU");
+            }
+            ImGui::EndTable();
+        }
+
+        if(begin_section("View")) {
+            row("Projection");
+            SegmentedControl("##projection", &settings.orthographic, "Perspective", "Orthographic");
+            row("Rotation");
+            SegmentedControl("##rotation", &settings.trackball, "Turntable", "Trackball");
+            ImGui::SetItemTooltip("Turntable keeps Z pointing up, trackball rotates freely in any direction");
+            row("Axes");
+            ImGui::Checkbox("##axes", &settings.show_axes);
+            ImGui::SetItemTooltip("X, Y and Z axes through the origin (red, green, blue)");
+            ImGui::EndTable();
+        }
+
+        if(begin_section("Grid")) {
+            row("Show");
+            ImGui::Checkbox("##grid", &settings.show_grid);
+            ImGui::SetItemTooltip("Grid on the XY plane");
+
+            row("Spacing");
+            {
+                // the slider snaps to 1, 2, 5, 10, 20, 50... the box takes anything
+                static float const nice_spacings[] = { 0.01f, 0.02f, 0.05f, 0.1f, 0.2f, 0.5f, 1.0f,  2.0f,   5.0f,   10.0f,
+                                                       20.0f, 50.0f, 100.0f, 200.0f, 500.0f, 1000.0f };
+                int const num_spacings = (int)std::size(nice_spacings);
+
+                // nearest (in log terms) to the current value
+                int index = 0;
+                for(int i = 1; i < num_spacings; ++i) {
+                    if(std::abs(std::log(nice_spacings[i] / settings.grid_spacing)) < std::abs(std::log(nice_spacings[index] / settings.grid_spacing))) {
+                        index = i;
+                    }
+                }
+
+                float const box_width = ImGui::GetFontSize() * 4;
+                ImGui::SetNextItemWidth(control_width - box_width - ImGui::GetStyle().ItemInnerSpacing.x);
+                std::string label = std::format("{:g}", nice_spacings[index]);
+                if(ImGui::SliderInt("##spacing_slider", &index, 0, num_spacings - 1, label.c_str(), ImGuiSliderFlags_AlwaysClamp)) {
+                    settings.grid_spacing = nice_spacings[index];
+                }
+                ImGui::SetItemTooltip("Distance between grid lines (every 10th line is stronger)");
+                ImGui::SameLine(0, ImGui::GetStyle().ItemInnerSpacing.x);
+                ImGui::SetNextItemWidth(box_width);
+                if(ImGui::InputFloat("##spacing", &settings.grid_spacing, 0, 0, "%g")) {
+                    settings.grid_spacing = std::clamp(settings.grid_spacing, 0.001f, 100000.0f);
+                }
+                ImGui::SetItemTooltip("Any spacing (e.g. 2.54 for 0.1\")");
             }
 
-            float const box_width = ImGui::GetFontSize() * 4;
-            ImGui::SetNextItemWidth(slider_width - box_width - ImGui::GetStyle().ItemInnerSpacing.x);
-            std::string label = std::format("{:g}", nice_spacings[index]);
-            if(ImGui::SliderInt("##spacing_slider", &index, 0, num_spacings - 1, label.c_str(), ImGuiSliderFlags_AlwaysClamp)) {
-                settings.grid_spacing = nice_spacings[index];
+            row("Color");
+            ImGui::ColorEdit4("##grid_color", (float *)settings.grid_color, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
+            ImGui::EndTable();
+        }
+
+        if(begin_section("Selection")) {
+            row("Tint color");
+            ImGui::ColorEdit3("##tint_color", (float *)settings.selection_color, ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_NoInputs);
+            row("Tint strength");
+            ImGui::SliderFloat("##tint_strength", &settings.selection_color.a, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+            ImGui::SetItemTooltip("How much of the tint color is mixed into selected parts");
+            ImGui::EndTable();
+        }
+
+        if(begin_section("Fit")) {
+            row("Border");
+            float border_percent = settings.fit_border * 100.0f;
+            if(ImGui::SliderFloat("##border", &border_percent, 0.0f, 30.0f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp)) {
+                settings.fit_border = border_percent / 100.0f;
             }
-            ImGui::SetItemTooltip("Distance between grid lines (every 10th line is stronger)");
-            ImGui::SameLine(0, ImGui::GetStyle().ItemInnerSpacing.x);
-            ImGui::SetNextItemWidth(box_width);
-            if(ImGui::InputFloat("Spacing", &settings.grid_spacing, 0, 0, "%g")) {
-                settings.grid_spacing = std::clamp(settings.grid_spacing, 0.001f, 100000.0f);
+            ImGui::SetItemTooltip("Space left around the model (or selection) on each side");
+            row("Animation");
+            ImGui::SliderFloat("##animation", &settings.fit_duration, 0.0f, 2.0f, "%.2f s", ImGuiSliderFlags_AlwaysClamp);
+            ImGui::SetItemTooltip("How long Fit takes to get there (0 = instant)");
+            ImGui::EndTable();
+        }
+
+        if(begin_section("Zoom")) {
+            row("Step");
+            float step_percent = settings.zoom_step * 100.0f;
+            if(ImGui::SliderFloat("##step", &step_percent, 2.0f, 50.0f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp)) {
+                settings.zoom_step = step_percent / 100.0f;
             }
-            ImGui::SetItemTooltip("Any spacing (e.g. 2.54 for 0.1\")");
+            ImGui::SetItemTooltip("How far each wheel click moves, as a fraction of the distance to the model");
+            row("Close up speed");
+            float floor_percent = settings.zoom_floor * 100.0f;
+            if(ImGui::SliderFloat("##close_up_speed", &floor_percent, 2.0f, 100.0f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp)) {
+                settings.zoom_floor = floor_percent / 100.0f;
+            }
+            ImGui::SetItemTooltip(
+                "Close to (or inside) the model, zoom speed is based on this fraction\nof the size of the selection (or the model if nothing's selected)");
+            row("Smoothing");
+            ImGui::SliderFloat("##smoothing", &settings.zoom_smooth_time, 0.0f, 0.5f, "%.2f s", ImGuiSliderFlags_AlwaysClamp);
+            ImGui::SetItemTooltip("How long each wheel click glides for (0 = instant)");
+            ImGui::EndTable();
         }
-        ImGui::ColorEdit4("Grid color", (float *)settings.grid_color, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
-
-        ImGui::SeparatorText("Selection");
-        ImGui::ColorEdit3("Tint color", (float *)settings.selection_color, ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_NoInputs);
-        ImGui::SliderFloat("Tint strength", &settings.selection_color.a, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-        ImGui::SetItemTooltip("How much of the tint color is mixed into selected parts");
-
-        ImGui::SeparatorText("Fit");
-        float border_percent = settings.fit_border * 100.0f;
-        if(ImGui::SliderFloat("Border", &border_percent, 0.0f, 30.0f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp)) {
-            settings.fit_border = border_percent / 100.0f;
-        }
-        ImGui::SetItemTooltip("Space left around the model (or selection) on each side");
-        ImGui::SliderFloat("Animation", &settings.fit_duration, 0.0f, 2.0f, "%.2f s", ImGuiSliderFlags_AlwaysClamp);
-        ImGui::SetItemTooltip("How long Fit takes to get there (0 = instant)");
-
-        ImGui::SeparatorText("Zoom");
-        float step_percent = settings.zoom_step * 100.0f;
-        if(ImGui::SliderFloat("Step", &step_percent, 2.0f, 50.0f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp)) {
-            settings.zoom_step = step_percent / 100.0f;
-        }
-        ImGui::SetItemTooltip("How far each wheel click moves, as a fraction of the distance to the model");
-        float floor_percent = settings.zoom_floor * 100.0f;
-        if(ImGui::SliderFloat("Close up speed", &floor_percent, 2.0f, 100.0f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp)) {
-            settings.zoom_floor = floor_percent / 100.0f;
-        }
-        ImGui::SetItemTooltip("Close to (or inside) the model, zoom speed is based on this fraction\nof the size of the selection (or the model if nothing's selected)");
-        ImGui::SliderFloat("Smoothing", &settings.zoom_smooth_time, 0.0f, 0.5f, "%.2f s", ImGuiSliderFlags_AlwaysClamp);
-        ImGui::SetItemTooltip("How long each wheel click glides for (0 = instant)");
-
-        ImGui::PopItemWidth();
 
         ImGui::Spacing();
         ImGui::Separator();
@@ -1523,9 +1607,14 @@ void step_viewer::gpu_render()
     params.projection = cam.projection_matrix(aspect);
     params.eye = cam.eye();
     params.show_edges = settings.show_edges;
+
+    // line widths are in window pixels, the viewport is in render target pixels (more on a high DPI screen)
+    params.edge_width = std::clamp(settings.edge_width, 1.0f, 4.0f) * scale_y;
+    params.axis_width = 1.5f * scale_y;
     params.realistic = model != nullptr && (model->has_pbr_materials || settings.realistic_shading);
     params.exposure = settings.exposure;
     params.transparency = settings.transparency;
+    renderer.set_samples(samples_for(settings.antialiasing));
     params.peel_layers = settings.transparency_layers;
     std::copy((float const *)settings.selection_color, (float const *)settings.selection_color + 4, params.selection_tint);
     params.parts = model != nullptr ? &model->parts : nullptr;

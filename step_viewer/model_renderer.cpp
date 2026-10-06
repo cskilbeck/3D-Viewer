@@ -33,6 +33,20 @@ namespace
         float params[4];
     };
 
+    // edges and axes: strips of pixels, see edge.vert
+    struct edge_vertex_uniforms
+    {
+        gpu::mat4 view;
+        gpu::mat4 projection;
+        float viewport[4];    // size in pixels, line width
+    };
+
+    struct edge_fragment_uniforms
+    {
+        float color[4];
+        float width[4];
+    };
+
     struct peel_uniforms
     {
         float layer[4];    // x = 1 for the first layer
@@ -63,17 +77,6 @@ namespace
 
     //////////////////////////////////////////////////////////////////////
 
-    SDL_GPUSampleCount best_sample_count(SDL_GPUDevice *gpu, SDL_GPUTextureFormat color_format, SDL_GPUTextureFormat depth_format)
-    {
-        for(SDL_GPUSampleCount count : { SDL_GPU_SAMPLECOUNT_4, SDL_GPU_SAMPLECOUNT_2 }) {
-            if(SDL_GPUTextureSupportsSampleCount(gpu, color_format, count) && SDL_GPUTextureSupportsSampleCount(gpu, depth_format, count)) {
-                return count;
-            }
-        }
-        return SDL_GPU_SAMPLECOUNT_1;
-    }
-
-    //////////////////////////////////////////////////////////////////////
     // draw(first, count) for everything in start..total except the hidden parts' ranges,
     // so it's one draw when nothing's hidden. range(part) gets a part's {first, count},
     // parts are in order so the ranges are too. Anything which isn't in a part is drawn
@@ -139,13 +142,110 @@ bool model_renderer::init(gpu::device &device, SDL_GPUTextureFormat swapchain_fo
         depth_format = SDL_GPU_TEXTUREFORMAT_D24_UNORM;
     }
 
-    sample_count = best_sample_count(gpu, color_format, depth_format);
+    sample_count = supported_sample_count(4);
 
-    peel_supported =
+    peel_formats_supported =
         SDL_GPUTextureSupportsFormat(gpu, peel_depth_format, SDL_GPU_TEXTURETYPE_2D, SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER) &&
         SDL_GPUTextureSupportsFormat(gpu, layers_format, SDL_GPU_TEXTURETYPE_2D, SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
 
-    LOG_INFO("Render targets: {} samples, depth format {}, depth peeling {}", 1 << (int)sample_count, (int)depth_format, peel_supported ? "yes" : "no");
+    LOG_INFO("Depth format {}, depth peeling {}", (int)depth_format, peel_formats_supported ? "possible" : "not supported");
+
+    bool ok = true;
+
+
+    // textures for materials which don't have them, and the samplers
+
+    if(ok) {
+        uint8_t const white[4] = { 255, 255, 255, 255 };
+        uint8_t const flat_normal[4] = { 128, 128, 255, 255 };
+        white_texture = dev->create_texture(white, 1, 1, false, false, "white");
+        flat_normal_texture = dev->create_texture(flat_normal, 1, 1, false, false, "flat normal");
+
+        SDL_GPUSamplerCreateInfo sci{};
+        sci.min_filter = SDL_GPU_FILTER_LINEAR;
+        sci.mag_filter = SDL_GPU_FILTER_LINEAR;
+        sci.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_LINEAR;
+        sci.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
+        sci.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
+        sci.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
+        sci.enable_anisotropy = true;
+        sci.max_anisotropy = 8;
+        sci.min_lod = 0;
+        sci.max_lod = 1000;
+        sampler = SDL_CreateGPUSampler(gpu, &sci);
+
+        SDL_GPUSamplerCreateInfo pci{};
+        pci.min_filter = SDL_GPU_FILTER_NEAREST;
+        pci.mag_filter = SDL_GPU_FILTER_NEAREST;
+        pci.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+        pci.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        pci.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        pci.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        point_sampler = SDL_CreateGPUSampler(gpu, &pci);
+
+        if(white_texture == nullptr || flat_normal_texture == nullptr || sampler == nullptr || point_sampler == nullptr) {
+            LOG_ERROR("Can't create default textures/samplers: {}", SDL_GetError());
+            ok = false;
+        }
+    }
+
+    if(ok) {
+        grid_vertex const square[4] = { { { -1, -1 } }, { { 1, -1 } }, { { -1, 1 } }, { { 1, 1 } } };
+        grid_buffer = dev->create_buffer(SDL_GPU_BUFFERUSAGE_VERTEX, square, sizeof(square), "grid");
+        ok = grid_buffer != nullptr;
+    }
+
+    return ok && create_pipelines();
+}
+
+//////////////////////////////////////////////////////////////////////
+// MSAA sample counts the GPU can do with our color and depth formats
+
+bool model_renderer::sample_count_supported(int samples) const
+{
+    if(samples <= 1) {
+        return true;
+    }
+    SDL_GPUSampleCount count = samples >= 8 ? SDL_GPU_SAMPLECOUNT_8 : samples >= 4 ? SDL_GPU_SAMPLECOUNT_4 : SDL_GPU_SAMPLECOUNT_2;
+    return SDL_GPUTextureSupportsSampleCount(dev->gpu, color_format, count) && SDL_GPUTextureSupportsSampleCount(dev->gpu, depth_format, count);
+}
+
+//////////////////////////////////////////////////////////////////////
+// the most samples which can be done, up to the number asked for
+
+SDL_GPUSampleCount model_renderer::supported_sample_count(int samples) const
+{
+    for(int n : { 8, 4, 2 }) {
+        if(n <= samples && sample_count_supported(n)) {
+            return n == 8 ? SDL_GPU_SAMPLECOUNT_8 : n == 4 ? SDL_GPU_SAMPLECOUNT_4 : SDL_GPU_SAMPLECOUNT_2;
+        }
+    }
+    return SDL_GPU_SAMPLECOUNT_1;
+}
+
+//////////////////////////////////////////////////////////////////////
+// MSAA samples (1 = off): the pipelines and targets are made again if it changes
+
+void model_renderer::set_samples(int samples)
+{
+    SDL_GPUSampleCount count = supported_sample_count(samples);
+    if(count == sample_count) {
+        return;
+    }
+    LOG_INFO("Anti-aliasing: {} samples", 1 << (int)count);
+    release_pipelines();
+    release_targets();
+    sample_count = count;
+    create_pipelines();
+}
+
+//////////////////////////////////////////////////////////////////////
+// all the pipelines (the MSAA ones depend on the sample count, it's simplest to make them all again)
+
+bool model_renderer::create_pipelines()
+{
+    SDL_GPUDevice *gpu = dev->gpu;
+    peel_supported = peel_formats_supported;
 
     SDL_GPUShader *mesh_vert = dev->load_shader("mesh.vert", SDL_GPU_SHADERSTAGE_VERTEX, 1);
     SDL_GPUShader *mesh_frag = dev->load_shader("mesh.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
@@ -321,60 +421,31 @@ bool model_renderer::init(gpu::device &device, SDL_GPUTextureFormat swapchain_fo
         }
     }
 
-    // textures for materials which don't have them, and the samplers
-
-    if(ok) {
-        uint8_t const white[4] = { 255, 255, 255, 255 };
-        uint8_t const flat_normal[4] = { 128, 128, 255, 255 };
-        white_texture = dev->create_texture(white, 1, 1, false, false, "white");
-        flat_normal_texture = dev->create_texture(flat_normal, 1, 1, false, false, "flat normal");
-
-        SDL_GPUSamplerCreateInfo sci{};
-        sci.min_filter = SDL_GPU_FILTER_LINEAR;
-        sci.mag_filter = SDL_GPU_FILTER_LINEAR;
-        sci.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_LINEAR;
-        sci.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
-        sci.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
-        sci.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
-        sci.enable_anisotropy = true;
-        sci.max_anisotropy = 8;
-        sci.min_lod = 0;
-        sci.max_lod = 1000;
-        sampler = SDL_CreateGPUSampler(gpu, &sci);
-
-        SDL_GPUSamplerCreateInfo pci{};
-        pci.min_filter = SDL_GPU_FILTER_NEAREST;
-        pci.mag_filter = SDL_GPU_FILTER_NEAREST;
-        pci.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
-        pci.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
-        pci.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
-        pci.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
-        point_sampler = SDL_CreateGPUSampler(gpu, &pci);
-
-        if(white_texture == nullptr || flat_normal_texture == nullptr || sampler == nullptr || point_sampler == nullptr) {
-            LOG_ERROR("Can't create default textures/samplers: {}", SDL_GetError());
-            ok = false;
-        }
-    }
-
-    // edges
+    // edges: the line list is read a segment (two vertices) per instance, each instance is
+    // two triangles making a strip of pixels along the segment, the sides blended
 
     if(ok) {
         SDL_GPUVertexBufferDescription buffer{};
         buffer.slot = 0;
-        buffer.pitch = sizeof(edge_vertex);
-        buffer.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+        buffer.pitch = sizeof(edge_vertex) * 2;
+        buffer.input_rate = SDL_GPU_VERTEXINPUTRATE_INSTANCE;
 
-        SDL_GPUVertexAttribute attribute{ 0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, offsetof(edge_vertex, position) };
+        SDL_GPUVertexAttribute attributes[2] = {
+            { 0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 0 },
+            { 1, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, sizeof(edge_vertex) },
+        };
+
+        SDL_GPUColorTargetDescription blended_target = color_target;
+        blended_target.blend_state = blend_state(SDL_GPU_BLENDFACTOR_ONE, SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA);
 
         SDL_GPUGraphicsPipelineCreateInfo ci{};
         ci.vertex_shader = edge_vert;
         ci.fragment_shader = edge_frag;
         ci.vertex_input_state.vertex_buffer_descriptions = &buffer;
         ci.vertex_input_state.num_vertex_buffers = 1;
-        ci.vertex_input_state.vertex_attributes = &attribute;
-        ci.vertex_input_state.num_vertex_attributes = 1;
-        ci.primitive_type = SDL_GPU_PRIMITIVETYPE_LINELIST;
+        ci.vertex_input_state.vertex_attributes = attributes;
+        ci.vertex_input_state.num_vertex_attributes = 2;
+        ci.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
         ci.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
         ci.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
         ci.depth_stencil_state.enable_depth_test = true;
@@ -382,11 +453,27 @@ bool model_renderer::init(gpu::device &device, SDL_GPUTextureFormat swapchain_fo
         ci.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_GREATER_OR_EQUAL;
         ci.multisample_state = multisample;
         ci.target_info = target_info;
+        ci.target_info.color_target_descriptions = &blended_target;
 
         edge_pipeline = SDL_CreateGPUGraphicsPipeline(gpu, &ci);
         if(edge_pipeline == nullptr) {
             LOG_ERROR("Can't create edge pipeline: {}", SDL_GetError());
             ok = false;
+        }
+
+        // depth peeling: over the composited image (no MSAA), hidden by the opaque depth from the peeling
+        if(peel_supported) {
+            SDL_GPUColorTargetDescription overlay_target = blended_target;
+            overlay_target.format = color_format;
+            ci.target_info.color_target_descriptions = &overlay_target;
+            ci.target_info.depth_stencil_format = peel_depth_format;
+            ci.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
+            ci.depth_stencil_state.enable_depth_write = false;
+            edge_overlay_pipeline = SDL_CreateGPUGraphicsPipeline(gpu, &ci);
+            if(edge_overlay_pipeline == nullptr) {
+                LOG_ERROR("Can't create edge overlay pipeline: {}", SDL_GetError());
+                peel_supported = false;
+            }
         }
     }
 
@@ -428,8 +515,6 @@ bool model_renderer::init(gpu::device &device, SDL_GPUTextureFormat swapchain_fo
             ok = false;
         }
 
-        grid_vertex const square[4] = { { { -1, -1 } }, { { 1, -1 } }, { { -1, 1 } }, { { 1, 1 } } };
-        grid_buffer = dev->create_buffer(SDL_GPU_BUFFERUSAGE_VERTEX, square, sizeof(square), "grid");
     }
 
     // pipelines keep what they need from the shaders
@@ -455,18 +540,8 @@ bool model_renderer::init(gpu::device &device, SDL_GPUTextureFormat swapchain_fo
 
 //////////////////////////////////////////////////////////////////////
 
-void model_renderer::cleanup()
+void model_renderer::release_pipelines()
 {
-    if(dev == nullptr) {
-        return;
-    }
-    clear_model();
-    release_targets();
-    release_peel_targets();
-    if(grid_buffer != nullptr) {
-        SDL_ReleaseGPUBuffer(dev->gpu, grid_buffer);
-        grid_buffer = nullptr;
-    }
     for(SDL_GPUGraphicsPipeline **pipeline : { &mesh_pipeline,
                                                 &transparent_back_pipeline,
                                                 &transparent_front_pipeline,
@@ -476,6 +551,7 @@ void model_renderer::cleanup()
                                                 &pbr_transparent_front_pipeline,
                                                 &pbr_transparent_both_pipeline,
                                                 &edge_pipeline,
+                                                &edge_overlay_pipeline,
                                                 &grid_pipeline,
                                                 &opaque_depth_pipeline,
                                                 &peel_depth_pipeline,
@@ -488,6 +564,23 @@ void model_renderer::cleanup()
             *pipeline = nullptr;
         }
     }
+}
+
+//////////////////////////////////////////////////////////////////////
+
+void model_renderer::cleanup()
+{
+    if(dev == nullptr) {
+        return;
+    }
+    clear_model();
+    release_targets();
+    release_peel_targets();
+    if(grid_buffer != nullptr) {
+        SDL_ReleaseGPUBuffer(dev->gpu, grid_buffer);
+        grid_buffer = nullptr;
+    }
+    release_pipelines();
     for(SDL_GPUTexture **texture : { &white_texture, &flat_normal_texture }) {
         if(*texture != nullptr) {
             SDL_ReleaseGPUTexture(dev->gpu, *texture);
@@ -935,6 +1028,46 @@ void model_renderer::draw_transparent_parts(SDL_GPUCommandBuffer *cmd, SDL_GPURe
 }
 
 //////////////////////////////////////////////////////////////////////
+// Edges and axes. They go on top of the transparent surfaces so they're always the same
+// color (otherwise edges behind glass get washed out and look inconsistent), only opaque
+// surfaces hide them. Each segment (two edge vertices) is an instance of 6 vertices
+
+void model_renderer::draw_lines(SDL_GPUCommandBuffer *cmd, SDL_GPURenderPass *pass, draw_params const &params, SDL_GPUGraphicsPipeline *pipeline) const
+{
+    viewport_t const &viewport = params.viewport;
+
+    if(params.show_edges && num_edge_vertices != 0) {
+        edge_vertex_uniforms edge_vertex_data{ params.view, params.projection, { viewport.w, viewport.h, params.edge_width, 0 } };
+        edge_fragment_uniforms edge{ { edge_color[0], edge_color[1], edge_color[2], edge_color[3] }, { params.edge_width, 0, 0, 0 } };
+        SDL_BindGPUGraphicsPipeline(pass, pipeline);
+        SDL_PushGPUVertexUniformData(cmd, 0, &edge_vertex_data, sizeof(edge_vertex_data));
+        SDL_PushGPUFragmentUniformData(cmd, 0, &edge, sizeof(edge));
+        SDL_GPUBufferBinding vertices{ edge_buffer, 0 };
+        SDL_BindGPUVertexBuffers(pass, 0, &vertices, 1);
+        draw_visible(
+            0,
+            num_edge_vertices,
+            params.parts,
+            [](step_part const &part) { return std::pair{ part.first_edge_vertex, part.num_edge_vertices }; },
+            [&](uint32_t first, uint32_t count) { SDL_DrawGPUPrimitives(pass, 6, count / 2, 0, first / 2); });
+    }
+
+    if(params.show_axes && axes_buffer != nullptr) {
+        edge_vertex_uniforms axis_vertex_data{ params.view, params.projection, { viewport.w, viewport.h, params.axis_width, 0 } };
+        SDL_BindGPUGraphicsPipeline(pass, pipeline);
+        SDL_PushGPUVertexUniformData(cmd, 0, &axis_vertex_data, sizeof(axis_vertex_data));
+        SDL_GPUBufferBinding vertices{ axes_buffer, 0 };
+        SDL_BindGPUVertexBuffers(pass, 0, &vertices, 1);
+        for(int axis = 0; axis < 3; ++axis) {
+            edge_fragment_uniforms axis_color{ {}, { params.axis_width, 0, 0, 0 } };
+            std::copy(axis_colors[axis], axis_colors[axis] + 4, axis_color.color);
+            SDL_PushGPUFragmentUniformData(cmd, 0, &axis_color, sizeof(axis_color));
+            SDL_DrawGPUPrimitives(pass, 6, 1, 0, axis);
+        }
+    }
+}
+
+//////////////////////////////////////////////////////////////////////
 // Depth peeling: the transparent surfaces a layer at a time, front to back, into
 // layers_texture, which then goes over the opaque image (already in the swapchain)
 
@@ -1053,6 +1186,19 @@ void model_renderer::render_peeled(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *sw
         SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
         SDL_EndGPURenderPass(pass);
     }
+
+    // edges and axes on top, hidden by the opaque surfaces
+    if(params.show_edges || params.show_axes) {
+        SDL_GPUColorTargetInfo color{};
+        color.texture = swapchain_texture;
+        color.load_op = SDL_GPU_LOADOP_LOAD;
+        color.store_op = SDL_GPU_STOREOP_STORE;
+        SDL_GPUDepthStencilTargetInfo depth = depth_target(opaque_depth_texture, false);
+        depth.store_op = SDL_GPU_STOREOP_DONT_CARE;
+        SDL_GPURenderPass *pass = begin(&color, &depth);
+        draw_lines(cmd, pass, params, edge_overlay_pipeline);
+        SDL_EndGPURenderPass(pass);
+    }
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -1083,6 +1229,8 @@ void model_renderer::render(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *swapchain
     if(transparency == transparency_sorted) {
         update_sorted(cmd, params, realistic);    // a copy pass, so before the render pass
     }
+    bool peeling = transparency == transparency_peeled &&
+                   std::any_of(params.parts->begin(), params.parts->end(), [](step_part const &part) { return part.visible && part.num_transparent_indices != 0; });
 
     bool msaa = msaa_texture != nullptr;
 
@@ -1202,36 +1350,6 @@ void model_renderer::render(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *swapchain
             }
         }
 
-        // edges before the transparent parts so they show through them
-        if(params.show_edges && num_edge_vertices != 0) {
-            color_uniforms edge{ { edge_color[0], edge_color[1], edge_color[2], edge_color[3] } };
-            SDL_BindGPUGraphicsPipeline(pass, edge_pipeline);
-            SDL_PushGPUVertexUniformData(cmd, 0, &uniforms, sizeof(uniforms));
-            SDL_PushGPUFragmentUniformData(cmd, 0, &edge, sizeof(edge));
-            SDL_GPUBufferBinding vertices{ edge_buffer, 0 };
-            SDL_BindGPUVertexBuffers(pass, 0, &vertices, 1);
-            draw_visible(
-                0,
-                num_edge_vertices,
-                params.parts,
-                [](step_part const &part) { return std::pair{ part.first_edge_vertex, part.num_edge_vertices }; },
-                [&](uint32_t first, uint32_t count) { SDL_DrawGPUPrimitives(pass, count, 1, first, 0); });
-        }
-
-        // axes
-        if(params.show_axes && axes_buffer != nullptr) {
-            SDL_BindGPUGraphicsPipeline(pass, edge_pipeline);
-            SDL_PushGPUVertexUniformData(cmd, 0, &uniforms, sizeof(uniforms));
-            SDL_GPUBufferBinding vertices{ axes_buffer, 0 };
-            SDL_BindGPUVertexBuffers(pass, 0, &vertices, 1);
-            for(int axis = 0; axis < 3; ++axis) {
-                color_uniforms axis_color;
-                std::copy(axis_colors[axis], axis_colors[axis] + 4, axis_color.color);
-                SDL_PushGPUFragmentUniformData(cmd, 0, &axis_color, sizeof(axis_color));
-                SDL_DrawGPUPrimitives(pass, 2, 1, axis * 2, 0);
-            }
-        }
-
         // grid, transparent parts blend over it
         if(params.show_grid && grid_buffer != nullptr) {
             grid_vertex_uniforms grid_vertex_data{ params.view, params.projection, {} };
@@ -1293,14 +1411,16 @@ void model_renderer::render(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *swapchain
                 }
             }
         }
+
+        // depth peeling draws them after the layers
+        if(!peeling) {
+            draw_lines(cmd, pass, params, edge_pipeline);
+        }
     }
 
     SDL_EndGPURenderPass(pass);
 
-    if(transparency == transparency_peeled) {
-        bool any_visible = std::any_of(params.parts->begin(), params.parts->end(), [](step_part const &part) { return part.visible && part.num_transparent_indices != 0; });
-        if(any_visible) {
-            render_peeled(cmd, swapchain_texture, params, realistic);
-        }
+    if(peeling) {
+        render_peeled(cmd, swapchain_texture, params, realistic);
     }
 }

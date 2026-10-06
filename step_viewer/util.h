@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <chrono>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -30,7 +31,7 @@ int MsgBox(char const *banner, char const *text, char const *yes_text = "Yes", c
 
 // A row of buttons, one per option, the current one highlighted. label (if not empty)
 // goes after it like other widgets. Returns true if value changed
-bool SegmentedControl(char const *label, int *value, std::vector<char const *> const &options);
+bool SegmentedControl(char const *label, int *value, std::vector<char const *> const &options, uint32_t disabled = 0);
 
 // two choice version for a bool (options[0] = false, options[1] = true)
 bool SegmentedControl(char const *label, bool *value, char const *off_option, char const *on_option);
