@@ -12,15 +12,15 @@ jobs:
           - os: windows-latest
             artifact_name: windows
             static_runtime: "ON"
-            binary_path: build/step_viewer/Release/step_viewer.exe
+            binary_path: build/src/Release/step_viewer.exe
           - os: macos-latest
             artifact_name: macos
             static_runtime: "OFF"
-            binary_path: build/step_viewer/step_viewer.app
+            binary_path: build/src/step_viewer.app
           - os: ubuntu-latest
             artifact_name: ubuntu
             static_runtime: "ON"
-            binary_path: build/step_viewer/step_viewer
+            binary_path: build/src/step_viewer
 
     runs-on: ${{ matrix.os }}
 

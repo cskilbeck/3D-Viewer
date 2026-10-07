@@ -138,7 +138,7 @@ One way to do this is open a Command Prompt and enter this (assuming your Visual
 > cmake --build build
 ```
 
-The executable should be in `build/step_viewer/step_viewer.exe`
+The executable should be in `build/src/step_viewer.exe`
 
 #### Alternatively, if you want to use Visual Studio
 
@@ -244,7 +244,7 @@ $ cmake -G Ninja -B build
 $ cmake --build build
 ```
 
-The executable will be at `build/step_viewer/step_viewer`.
+The executable will be at `build/src/step_viewer`.
 
 The first configure pulls down a handful of dependencies via CMake FetchContent (SDL3, Dear ImGui, nativefiledialog-extended, nlohmann/json, stb and cmrc). It takes a few minutes the first time; subsequent builds are incremental.
 

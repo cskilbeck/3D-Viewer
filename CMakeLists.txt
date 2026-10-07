@@ -158,7 +158,7 @@ message("IPO/LTO is ${IPO_SUPPORTED}")
 include(compile_options)
 
 add_subdirectory(third_party)
-add_subdirectory(step_viewer)
+add_subdirectory(src)
 
 # makes the CAD test models (not built by default): cmake --build <dir> --target make_cad_models
 add_executable(make_cad_models EXCLUDE_FROM_ALL tools/make_cad_models.cpp)
