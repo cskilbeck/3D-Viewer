@@ -173,6 +173,12 @@ unset(CMAKE_POLICY_DEFAULT_CMP0091)
 # only includes when it's the top level project
 target_include_directories(assimp PRIVATE "${CMAKE_BINARY_DIR}")
 
+# Assimp's bundled zlib does `#define fdopen(fd,mode) NULL` on macOS unless fdopen is
+# already a macro, which breaks the declaration in current SDKs' <_stdio.h>
+if(APPLE AND TARGET zlibstatic)
+    target_compile_definitions(zlibstatic PRIVATE fdopen=fdopen)
+endif()
+
 ######################################################################
 # OpenCascade (built at configure time, see cmake/occt.cmake)
 
