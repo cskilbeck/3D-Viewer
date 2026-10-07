@@ -300,7 +300,11 @@ bool IconButton(const char *label, const char *icon)
 
 //////////////////////////////////////////////////////////////////////
 
-void RightAlignButtons(const std::vector<const char *> &labels)
+// align_to_content lines them up with the right edge of what's above them instead of the window's,
+// for AlwaysAutoResize windows: there the buttons would hold the window at its current width, so it
+// could never shrink, and with a vertical scrollbar it would grow by the scrollbar's width every frame
+
+void RightAlignButtons(const std::vector<const char *> &labels, bool align_to_content)
 {
     float totalWidth = 0.0f;
     float spacing = ImGui::GetStyle().ItemSpacing.x;
@@ -308,7 +312,12 @@ void RightAlignButtons(const std::vector<const char *> &labels)
         totalWidth += ImGui::CalcTextSize(label).x + ImGui::GetStyle().FramePadding.x * 2.0f;
     }
     totalWidth += spacing * (labels.size() - 1);
-    ImGui::SetCursorPosX(ImGui::GetWindowWidth() - totalWidth - ImGui::GetStyle().WindowPadding.x);
+    if(align_to_content) {
+        ImGuiWindow *window = ImGui::GetCurrentWindow();
+        ImGui::SetCursorScreenPos(ImVec2(std::max(window->DC.CursorPos.x, window->DC.CursorMaxPos.x - totalWidth), window->DC.CursorPos.y));
+    } else {
+        ImGui::SetCursorPosX(ImGui::GetWindowWidth() - totalWidth - ImGui::GetStyle().WindowPadding.x);
+    }
 }
 
 //////////////////////////////////////////////////////////////////////

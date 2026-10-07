@@ -966,13 +966,36 @@ void step_viewer::settings_ui()
     ImGui::SetNextWindowPos(view_center, ImGuiCond_FirstUseEver, ImVec2(0.5f, 0.5f));
     if(ImGui::Begin("Settings", &still_open, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoCollapse)) {
 
+        // it fits its contents (up to the height of the main window, then it gets a scrollbar),
+        // so move it up if expanding a section takes the bottom off the screen
+        ImVec2 const pos = ImGui::GetWindowPos();
+        float const bottom = main_viewport->WorkPos.y + main_viewport->WorkSize.y;
+        float const height = ImGui::GetWindowHeight();
+        if(pos.y + height > bottom) {
+            ImGui::SetWindowPos(ImVec2(pos.x, std::max(main_viewport->WorkPos.y, bottom - height)));
+        }
+
         // two columns, labels on the left and controls on the right, the same widths in every section so they line up
         float const label_width = ImGui::GetFontSize() * 8;
         float const control_width = ImGui::GetFontSize() * 14;
 
+        // the width of the tables (no borders, so just CellPadding.x between the columns), so the window
+        // doesn't change width as sections are expanded and collapsed
+        ImGui::Dummy(ImVec2(label_width + control_width + ImGui::GetStyle().CellPadding.x * 2, 0));
+
+        // collapsible, collapsed by default, which ones are expanded is remembered in the settings
         auto begin_section = [&](char const *name) {
-            ImGui::SeparatorText(name);
-            if(!ImGui::BeginTable(name, 2, ImGuiTableFlags_SizingFixedFit)) {
+            std::vector<std::string> &open_sections = settings.settings_sections_open;
+            auto found = std::ranges::find(open_sections, name);
+            bool const was_open = found != open_sections.end();
+            ImGui::SetNextItemOpen(was_open, ImGuiCond_Always);
+            bool const is_open = ImGui::CollapsingHeader(name);
+            if(is_open && !was_open) {
+                open_sections.emplace_back(name);
+            } else if(!is_open && was_open) {
+                open_sections.erase(found);
+            }
+            if(!is_open || !ImGui::BeginTable(name, 2, ImGuiTableFlags_SizingFixedFit)) {
                 return false;
             }
             ImGui::TableSetupColumn("label", ImGuiTableColumnFlags_WidthFixed, label_width);
@@ -1143,7 +1166,7 @@ void step_viewer::settings_ui()
         ImGui::Separator();
         ImGui::Spacing();
 
-        RightAlignButtons({ "Revert", "Defaults", "Close" });
+        RightAlignButtons({ "Revert", "Defaults", "Close" }, true);
 
         ImGui::BeginDisabled(settings.same_dialog_settings(settings_snapshot));
         if(ImGui::Button("Revert")) {

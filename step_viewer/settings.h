@@ -59,7 +59,8 @@ namespace settings
     X(float, grid_spacing, 10.0f)                                  \
     X(settings::color_t, grid_color, { 0.5f, 0.5f, 0.5f, 0.6f })  \
     X(bool, show_axes, false)                                      \
-    X(std::vector<std::string>, recent_files, {})
+    X(std::vector<std::string>, recent_files, {})                  \
+    X(std::vector<std::string>, settings_sections_open, {})
 
 struct settings_t
 {
@@ -72,7 +73,8 @@ struct settings_t
 
     bool operator==(settings_t const &) const = default;
 
-    // the window position/size and recent files aren't edited in the settings dialog, Revert/Defaults keep them
+    // the window position/size, recent files and which sections of the settings dialog are expanded
+    // aren't settings the dialog edits, Revert/Defaults keep them
     void copy_non_dialog_state(settings_t const &other)
     {
         window_maximized = other.window_maximized;
@@ -81,6 +83,7 @@ struct settings_t
         window_xpos = other.window_xpos;
         window_ypos = other.window_ypos;
         recent_files = other.recent_files;
+        settings_sections_open = other.settings_sections_open;
     }
 
     // same as far as the settings dialog is concerned

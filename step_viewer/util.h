@@ -26,7 +26,7 @@ std::filesystem::path settings_path();
 bool IconCheckbox(const char *label, bool *v, const char *icon_on, const char *icon_off);
 bool IconCheckboxTristate(const char *label, int *v, const char *icon_on, const char *icon_off, const char *icon_mixed);
 bool IconButton(const char *label, const char *icon);
-void RightAlignButtons(const std::vector<const char *> &labels);
+void RightAlignButtons(const std::vector<const char *> &labels, bool align_to_content = false);
 int MsgBox(char const *banner, char const *text, char const *yes_text = "Yes", char const *no_text = "No");
 
 // A row of buttons, one per option, the current one highlighted. label (if not empty)
