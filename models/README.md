@@ -5,8 +5,8 @@ A small set of files covering every kind of file and feature the viewer handles,
 ## Checking them
 
 ```
-step_viewer --check models            # load everything, compare with expected.json
-step_viewer --check models --update   # rewrite expected.json from what loads now
+3D-Viewer --check models            # load everything, compare with expected.json
+3D-Viewer --check models --update   # rewrite expected.json from what loads now
 ```
 
 The check runs without a window, takes about a second, and exits with 1 if anything doesn't match `expected.json`: whether it loads at all, the number of parts, triangles, materials and textures, whether it's shaded realistically, and its size in millimeters (to 0.01mm). New files and missing files count as failures too.

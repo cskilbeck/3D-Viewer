@@ -71,7 +71,7 @@ endif()
 ######################################################################
 # MAIN
 
-set(PROJECT step_viewer)
+set(PROJECT 3D-Viewer)
 
 set(PROJECT_SOURCES
         main.cpp
@@ -86,8 +86,8 @@ set(PROJECT_SOURCES
         camera.cpp
         model_renderer.h
         model_renderer.cpp
-        step_viewer.cpp
-        step_viewer.h
+        viewer.cpp
+        viewer.h
         step_model.cpp
         step_model.h
         model_builder.cpp
@@ -95,6 +95,8 @@ set(PROJECT_SOURCES
         assimp_loader.cpp
         model_check.cpp
         model_check.h
+        single_instance.cpp
+        single_instance.h
         util.h
         util.cpp
         settings.cpp
@@ -140,7 +142,7 @@ if (APPLE AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
     set_target_properties(${PROJECT} PROPERTIES
         MACOSX_BUNDLE TRUE
         MACOSX_BUNDLE_ICON_FILE "application.icns"
-        MACOSX_BUNDLE_GUI_IDENTIFIER "com.chs.step-viewer"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.chs.3d-viewer"
         MACOSX_BUNDLE_BUNDLE_NAME "3D Viewer"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
         MACOSX_BUNDLE_BUNDLE_VERSION "${CMAKE_PROJECT_VERSION_MAJOR}"
@@ -244,6 +246,11 @@ endif()
 target_include_directories(${PROJECT} PRIVATE ${CMRC_INCLUDE_DIR})
 
 target_link_libraries(${PROJECT} PRIVATE third_party my_assets my_shaders project_options)
+
+# sockets, for reuse window
+if(WIN32)
+    target_link_libraries(${PROJECT} PRIVATE ws2_32)
+endif()
 
 target_enable_ipo(${PROJECT})
 

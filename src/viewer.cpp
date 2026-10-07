@@ -17,14 +17,15 @@
 
 #include <nfd.h>
 
-#include "step_viewer.h"
+#include "single_instance.h"
+#include "viewer.h"
 #include "util.h"
 
 #include "assets/matsym_codepoints_utf8.h"
 
 using namespace sdl_compat;
 
-LOG_CONTEXT("step_viewer", info);
+LOG_CONTEXT("viewer", info);
 
 namespace
 {
@@ -55,12 +56,12 @@ namespace
 // If the user is interacting, it's not idle
 // But also... suppress idleness for a short while
 
-void step_viewer::set_active()
+void viewer::set_active()
 {
     idle_timestamp = get_time();
 }
 
-bool step_viewer::is_idle()
+bool viewer::is_idle()
 {
     if(cam.is_animating() || pending_zoom != 0) {
         return false;
@@ -70,7 +71,7 @@ bool step_viewer::is_idle()
     return get_time() - idle_timestamp > idle_timer;
 }
 
-int step_viewer::idle_timeout_ms()
+int viewer::idle_timeout_ms()
 {
     // keep the progress bar moving while loading (~30fps)
     return loading ? 33 : -1;
@@ -78,14 +79,14 @@ int step_viewer::idle_timeout_ms()
 
 //////////////////////////////////////////////////////////////////////
 
-std::string step_viewer::window_name() const
+std::string viewer::window_name() const
 {
     return app_friendly_name;
 }
 
 //////////////////////////////////////////////////////////////////////
 
-void step_viewer::on_drop(int count, const char **paths)
+void viewer::on_drop(int count, const char **paths)
 {
     // only one model at a time, take the last one
     if(count > 0) {
@@ -95,7 +96,7 @@ void step_viewer::on_drop(int count, const char **paths)
 
 //////////////////////////////////////////////////////////////////////
 
-bool step_viewer::mouse_in_viewport() const
+bool viewer::mouse_in_viewport() const
 {
     return mouse_x >= viewport_xpos && mouse_x < viewport_xpos + viewport_width && mouse_y >= viewport_ypos && mouse_y < viewport_ypos + viewport_height;
 }
@@ -103,7 +104,7 @@ bool step_viewer::mouse_in_viewport() const
 //////////////////////////////////////////////////////////////////////
 // LMB click select, LMB drag orbit, RMB/Shift+LMB pan, MMB drag zoom, wheel zoom
 
-void step_viewer::on_mouse_button(int button, int action, int mods)
+void viewer::on_mouse_button(int button, int action, int mods)
 {
     set_active();
 
@@ -150,7 +151,7 @@ void step_viewer::on_mouse_button(int button, int action, int mods)
 
 //////////////////////////////////////////////////////////////////////
 
-gpu::vec3 step_viewer::mouse_ray(float x, float y) const
+gpu::vec3 viewer::mouse_ray(float x, float y) const
 {
     float ndc_x = viewport_width > 0 ? (x - viewport_xpos) / viewport_width * 2.0f - 1.0f : 0.0f;
     float ndc_y = viewport_height > 0 ? 1.0f - (y - viewport_ypos) / viewport_height * 2.0f : 0.0f;
@@ -168,7 +169,7 @@ gpu::vec3 step_viewer::mouse_ray(float x, float y) const
 // floor based on the size of the selection (or the model) which makes close up
 // zooming a steady crawl at a speed which suits whatever's being looked at
 
-float step_viewer::zoom_click_distance(gpu::vec3 const &eye) const
+float viewer::zoom_click_distance(gpu::vec3 const &eye) const
 {
     gpu::vec3 box_min;
     gpu::vec3 box_max;
@@ -193,7 +194,7 @@ float step_viewer::zoom_click_distance(gpu::vec3 const &eye) const
 
 //////////////////////////////////////////////////////////////////////
 
-gpu::vec3 step_viewer::view_plane_point(float x, float y) const
+gpu::vec3 viewer::view_plane_point(float x, float y) const
 {
     gpu::vec3 origin;
     gpu::vec3 direction;
@@ -209,7 +210,7 @@ gpu::vec3 step_viewer::view_plane_point(float x, float y) const
 // Perspective moves the camera along the ray through the mouse, orthographic
 // can't (moving doesn't change anything) so it scales the view around the mouse
 
-void step_viewer::apply_zoom(float clicks, float x, float y)
+void viewer::apply_zoom(float clicks, float x, float y)
 {
     if(cam.orthographic) {
         cam.scale_view(clicks, view_plane_point(x, y), (float)viewport_height);
@@ -221,7 +222,7 @@ void step_viewer::apply_zoom(float clicks, float x, float y)
 //////////////////////////////////////////////////////////////////////
 // Use up some of the pending zoom each frame (exponential ease out)
 
-void step_viewer::update_zoom(double now)
+void viewer::update_zoom(double now)
 {
     if(pending_zoom == 0) {
         return;
@@ -243,7 +244,7 @@ void step_viewer::update_zoom(double now)
 
 //////////////////////////////////////////////////////////////////////
 
-gpu::vec3 step_viewer::point_under_mouse(float x, float y) const
+gpu::vec3 viewer::point_under_mouse(float x, float y) const
 {
     float ndc_x = viewport_width > 0 ? (x - viewport_xpos) / viewport_width * 2.0f - 1.0f : 0.0f;
     float ndc_y = viewport_height > 0 ? 1.0f - (y - viewport_ypos) / viewport_height * 2.0f : 0.0f;
@@ -270,7 +271,7 @@ gpu::vec3 step_viewer::point_under_mouse(float x, float y) const
 //////////////////////////////////////////////////////////////////////
 // Grab whatever's under the mouse, panning keeps it under the mouse
 
-void step_viewer::start_pan()
+void viewer::start_pan()
 {
     dragging = drag_mode::pan;
 
@@ -304,7 +305,7 @@ void step_viewer::start_pan()
 // Select the part under the mouse. Clicking again in the same place
 // selects the next part along the ray (wrapping around)
 
-void step_viewer::pick(float x, float y)
+void viewer::pick(float x, float y)
 {
     if(model == nullptr || viewport_width <= 0 || viewport_height <= 0) {
         return;
@@ -339,7 +340,7 @@ void step_viewer::pick(float x, float y)
 
 //////////////////////////////////////////////////////////////////////
 
-void step_viewer::toggle_isolate()
+void viewer::toggle_isolate()
 {
     if(model == nullptr) {
         return;
@@ -356,7 +357,7 @@ void step_viewer::toggle_isolate()
 
 //////////////////////////////////////////////////////////////////////
 
-void step_viewer::select_node(int node, bool reveal)
+void viewer::select_node(int node, bool reveal)
 {
     selected_node = node;
     selected_parts.clear();
@@ -369,7 +370,7 @@ void step_viewer::select_node(int node, bool reveal)
 
 //////////////////////////////////////////////////////////////////////
 
-void step_viewer::on_mouse_move(double xpos, double ypos)
+void viewer::on_mouse_move(double xpos, double ypos)
 {
     set_active();
 
@@ -420,7 +421,7 @@ void step_viewer::on_mouse_move(double xpos, double ypos)
 
 //////////////////////////////////////////////////////////////////////
 
-void step_viewer::on_scroll(double xoffset, double yoffset)
+void viewer::on_scroll(double xoffset, double yoffset)
 {
     set_active();
     if(model != nullptr && mouse_in_viewport()) {
@@ -440,7 +441,7 @@ void step_viewer::on_scroll(double xoffset, double yoffset)
 
 //////////////////////////////////////////////////////////////////////
 
-bool step_viewer::selection_bounds(gpu::vec3 &box_min, gpu::vec3 &box_max) const
+bool viewer::selection_bounds(gpu::vec3 &box_min, gpu::vec3 &box_max) const
 {
     if(model == nullptr || selected_parts.empty()) {
         return false;
@@ -458,7 +459,7 @@ bool step_viewer::selection_bounds(gpu::vec3 &box_min, gpu::vec3 &box_max) const
 
 //////////////////////////////////////////////////////////////////////
 
-bool step_viewer::model_bounds(gpu::vec3 &box_min, gpu::vec3 &box_max) const
+bool viewer::model_bounds(gpu::vec3 &box_min, gpu::vec3 &box_max) const
 {
     if(model == nullptr) {
         return false;
@@ -471,14 +472,14 @@ bool step_viewer::model_bounds(gpu::vec3 &box_min, gpu::vec3 &box_max) const
 
 //////////////////////////////////////////////////////////////////////
 
-float step_viewer::viewport_aspect() const
+float viewer::viewport_aspect() const
 {
     return viewport_height > 0 ? (float)viewport_width / (float)viewport_height : 1.0f;
 }
 
 //////////////////////////////////////////////////////////////////////
 
-void step_viewer::fit_to_view()
+void viewer::fit_to_view()
 {
     gpu::vec3 box_min;
     gpu::vec3 box_max;
@@ -494,7 +495,7 @@ void step_viewer::fit_to_view()
 
 //////////////////////////////////////////////////////////////////////
 
-void step_viewer::axis_view(int axis)
+void viewer::axis_view(int axis)
 {
     gpu::vec3 box_min;
     gpu::vec3 box_max;
@@ -527,7 +528,7 @@ void step_viewer::axis_view(int axis)
 
 //////////////////////////////////////////////////////////////////////
 
-void step_viewer::reset_view()
+void viewer::reset_view()
 {
     gpu::vec3 box_min;
     gpu::vec3 box_max;
@@ -541,7 +542,7 @@ void step_viewer::reset_view()
 
 //////////////////////////////////////////////////////////////////////
 
-void step_viewer::on_key(int key, int scancode, int action, int mods)
+void viewer::on_key(int key, int scancode, int action, int mods)
 {
     set_active();
 
@@ -551,7 +552,7 @@ void step_viewer::on_key(int key, int scancode, int action, int mods)
 //////////////////////////////////////////////////////////////////////
 // Keyboard shortcuts work whatever has focus, except while typing into something
 
-void step_viewer::handle_shortcuts()
+void viewer::handle_shortcuts()
 {
     ImGuiIO &io = ImGui::GetIO();
     if(io.WantTextInput || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) {
@@ -588,7 +589,7 @@ void step_viewer::handle_shortcuts()
 //////////////////////////////////////////////////////////////////////
 // most recent first, no duplicates, saved straight away
 
-void step_viewer::add_recent_file(std::filesystem::path const &path)
+void viewer::add_recent_file(std::filesystem::path const &path)
 {
     size_t constexpr max_recent_files = 10;
     std::u8string utf8 = path.u8string();
@@ -604,8 +605,12 @@ void step_viewer::add_recent_file(std::filesystem::path const &path)
 
 //////////////////////////////////////////////////////////////////////
 
-void step_viewer::on_closed()
+void viewer::on_closed()
 {
+    if(listening) {
+        single_instance::stop_listening();
+        listening = false;
+    }
     if(loader.joinable()) {
         loader.request_stop();
         loader.join();
@@ -622,7 +627,7 @@ void step_viewer::on_closed()
 
 //////////////////////////////////////////////////////////////////////
 
-void step_viewer::load_settings(std::filesystem::path const &path)
+void viewer::load_settings(std::filesystem::path const &path)
 {
     if(settings.load(path)) {
         LOG_DEBUG("Settings loaded...");
@@ -636,7 +641,7 @@ void step_viewer::load_settings(std::filesystem::path const &path)
 
 //////////////////////////////////////////////////////////////////////
 
-void step_viewer::save_settings(std::filesystem::path const &path)
+void viewer::save_settings(std::filesystem::path const &path)
 {
     LOG_INFO("save settings");
     window_state = get_window_state();
@@ -650,7 +655,7 @@ void step_viewer::save_settings(std::filesystem::path const &path)
 
 //////////////////////////////////////////////////////////////////////
 
-void step_viewer::on_window_size(int w, int h)
+void viewer::on_window_size(int w, int h)
 {
     gpu_window::on_window_size(w, h);
     window_width = w;
@@ -659,7 +664,7 @@ void step_viewer::on_window_size(int w, int h)
 
 //////////////////////////////////////////////////////////////////////
 
-void step_viewer::on_window_refresh()
+void viewer::on_window_refresh()
 {
     gpu_window::on_window_refresh();
     if(frames == 0) {
@@ -670,7 +675,7 @@ void step_viewer::on_window_refresh()
 
 //////////////////////////////////////////////////////////////////////
 
-bool step_viewer::on_init()
+bool viewer::on_init()
 {
 
 #ifdef WIN32
@@ -710,11 +715,12 @@ bool step_viewer::on_init()
         return false;
     }
 
-    // settings used to be in the config directory, pick them up from there if there's nothing new yet
+    // settings used to be in the home directory, pick them up from there if there's nothing new yet
+    // (they're saved in the new place)
     std::filesystem::path path = settings_path();
     std::error_code error;
     if(!std::filesystem::exists(path, error)) {
-        path = config_path(app_name, "settings.json");
+        path = home_path() / "3DViewer.settings";
     }
     load_settings(path);
 
@@ -723,7 +729,7 @@ bool step_viewer::on_init()
 
 //////////////////////////////////////////////////////////////////////
 
-void step_viewer::open_file(std::filesystem::path const &path)
+void viewer::open_file(std::filesystem::path const &path)
 {
     LOG_INFO("Open {}", path.string());
 
@@ -775,9 +781,63 @@ void step_viewer::open_file(std::filesystem::path const &path)
 }
 
 //////////////////////////////////////////////////////////////////////
+// Reuse window: listen for other instances while the setting's on. Requests come in on
+// a background thread and are passed to the main thread as an event
+
+void viewer::update_listening()
+{
+    if(!settings.reuse_window) {
+        if(listening) {
+            single_instance::stop_listening();
+            listening = false;
+        }
+        listen_failed = false;
+        return;
+    }
+    if(listening || listen_failed) {
+        return;
+    }
+    if(open_request_event == 0) {
+        open_request_event = SDL_RegisterEvents(1);
+    }
+    uint32_t const event_type = open_request_event;
+    listening = single_instance::start_listening([event_type](std::filesystem::path const &file) {
+        SDL_Event e{};
+        e.type = event_type;
+        e.user.data1 = new std::filesystem::path(file);
+        if(!SDL_PushEvent(&e)) {
+            delete(std::filesystem::path *)e.user.data1;
+        }
+    });
+    // if another instance is listening already, this one just doesn't (and doesn't keep trying)
+    listen_failed = !listening;
+}
+
+//////////////////////////////////////////////////////////////////////
+
+void viewer::on_user_event(SDL_Event const &event)
+{
+    if(open_request_event == 0 || event.type != open_request_event) {
+        return;
+    }
+    std::unique_ptr<std::filesystem::path> file((std::filesystem::path *)event.user.data1);
+
+    // to the front
+    if(SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED) {
+        SDL_RestoreWindow(window);
+    }
+    SDL_RaiseWindow(window);
+
+    if(file != nullptr && !file->empty()) {
+        open_file(*file);
+    }
+    set_active();
+}
+
+//////////////////////////////////////////////////////////////////////
 // pick up the result of a background load
 
-void step_viewer::check_loaded()
+void viewer::check_loaded()
 {
     std::lock_guard _(loaded_mutex);
     if(!load_finished) {
@@ -802,7 +862,7 @@ void step_viewer::check_loaded()
 
 //////////////////////////////////////////////////////////////////////
 
-void step_viewer::model_tree_ui(int node_index, bool parent_visible)
+void viewer::model_tree_ui(int node_index, bool parent_visible)
 {
     step_node const &node = model->nodes[node_index];
     bool visible = parent_visible && node.visible;
@@ -873,7 +933,7 @@ void step_viewer::model_tree_ui(int node_index, bool parent_visible)
 
 //////////////////////////////////////////////////////////////////////
 
-void step_viewer::file_open()
+void viewer::file_open()
 {
     auto path = load_file_dialog();
     if(path.has_value()) {
@@ -883,7 +943,7 @@ void step_viewer::file_open()
 
 //////////////////////////////////////////////////////////////////////
 
-std::expected<std::filesystem::path, std::error_code> step_viewer::load_file_dialog()
+std::expected<std::filesystem::path, std::error_code> viewer::load_file_dialog()
 {
     nfdu8char_t *path;
     nfdu8filteritem_t const filters[] = { { "All supported files", supported_file_spec().c_str() } };
@@ -906,7 +966,7 @@ std::expected<std::filesystem::path, std::error_code> step_viewer::load_file_dia
 
 //////////////////////////////////////////////////////////////////////
 
-void step_viewer::open_settings()
+void viewer::open_settings()
 {
     settings_snapshot = settings;
     settings_open = true;
@@ -915,7 +975,7 @@ void step_viewer::open_settings()
 
 //////////////////////////////////////////////////////////////////////
 
-void step_viewer::revert_settings()
+void viewer::revert_settings()
 {
     settings_t current = settings;
     settings = settings_snapshot;
@@ -924,7 +984,7 @@ void step_viewer::revert_settings()
 
 //////////////////////////////////////////////////////////////////////
 
-void step_viewer::default_settings()
+void viewer::default_settings()
 {
     settings_t defaults;
     defaults.copy_non_dialog_state(settings);
@@ -933,7 +993,7 @@ void step_viewer::default_settings()
 
 //////////////////////////////////////////////////////////////////////
 
-void step_viewer::shading_control(char const *label, char const *cad, char const *realistic)
+void viewer::shading_control(char const *label, char const *cad, char const *realistic)
 {
     if(model != nullptr && model->has_pbr_materials) {
         bool always = true;
@@ -952,7 +1012,7 @@ void step_viewer::shading_control(char const *label, char const *cad, char const
 // so there's no Apply, just Revert (to how they were when the dialog opened),
 // Defaults and Close. Settings are saved when it closes.
 
-void step_viewer::settings_ui()
+void viewer::settings_ui()
 {
     if(!settings_open) {
         return;
@@ -1012,6 +1072,14 @@ void step_viewer::settings_ui()
             ImGui::TableSetColumnIndex(1);
             ImGui::SetNextItemWidth(control_width);
         };
+
+        if(begin_section("General")) {
+            row("Reuse window");
+            ImGui::Checkbox("##reuse_window", &settings.reuse_window);
+            ImGui::SetItemTooltip("Opening a file when 3D Viewer is already running opens it in that window\n"
+                                  "instead of starting another one");
+            ImGui::EndTable();
+        }
 
         if(begin_section("Appearance")) {
             row("Background");
@@ -1196,7 +1264,7 @@ void step_viewer::settings_ui()
 
 //////////////////////////////////////////////////////////////////////
 
-std::string step_viewer::loading_text() const
+std::string viewer::loading_text() const
 {
     std::u8string name = loading_path.filename().u8string();
     return "Loading " + std::string(name.begin(), name.end());
@@ -1205,7 +1273,7 @@ std::string step_viewer::loading_text() const
 //////////////////////////////////////////////////////////////////////
 // in the middle of the 3D view, only when there's nowhere else to show it
 
-void step_viewer::loading_window_ui()
+void viewer::loading_window_ui()
 {
     if(!loading || settings.view_info || settings.view_toolbar) {
         return;
@@ -1224,7 +1292,7 @@ void step_viewer::loading_window_ui()
 
 //////////////////////////////////////////////////////////////////////
 
-void step_viewer::ui()
+void viewer::ui()
 {
     auto is_active = [] {
         ImGuiIO &io = ImGui::GetIO();
@@ -1508,9 +1576,10 @@ void step_viewer::ui()
 
 //////////////////////////////////////////////////////////////////////
 
-void step_viewer::on_render()
+void viewer::on_render()
 {
     check_loaded();
+    update_listening();
 
     handle_shortcuts();
 
@@ -1589,7 +1658,7 @@ void step_viewer::on_render()
 // Nothing to draw yet, just clear to the background color
 // ImGui is drawn over the top in on_gpu_imgui()
 
-void step_viewer::gpu_render()
+void viewer::gpu_render()
 {
     gpu_cmd = SDL_AcquireGPUCommandBuffer(gpu_dev.gpu);
     if(!gpu_cmd) {
@@ -1668,7 +1737,7 @@ void step_viewer::gpu_render()
 
 //////////////////////////////////////////////////////////////////////
 
-void step_viewer::on_gpu_imgui()
+void viewer::on_gpu_imgui()
 {
     if(!gpu_cmd) {
         // gpu_render() failed to acquire — nothing to do

@@ -11,7 +11,7 @@
 set(_file "src/gpu/d3d12/SDL_gpu_d3d12.c")
 file(READ "${_file}" _source)
 
-if(_source MATCHES "patched by step_viewer")
+if(_source MATCHES "patched by 3D-Viewer")
     return()
 endif()
 
@@ -29,7 +29,7 @@ set(_to [=[    /* Acquire GPU descriptor heaps if we haven't yet */
         D3D12_INTERNAL_SetGPUDescriptorHeaps(commandBuffer);
     } else if (commandBuffer->gpuDescriptorHeaps[0]->currentDescriptorIndex + 256 > commandBuffer->gpuDescriptorHeaps[0]->maxDescriptors ||
                commandBuffer->gpuDescriptorHeaps[1]->currentDescriptorIndex + 256 > commandBuffer->gpuDescriptorHeaps[1]->maxDescriptors) {
-        /* patched by step_viewer: nearly full, start new heaps and rebind everything into them */
+        /* patched by 3D-Viewer: nearly full, start new heaps and rebind everything into them */
         D3D12_INTERNAL_SetGPUDescriptorHeaps(commandBuffer);
         commandBuffer->needVertexSamplerBind = true;
         commandBuffer->needVertexStorageTextureBind = true;

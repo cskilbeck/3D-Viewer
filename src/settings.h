@@ -37,6 +37,7 @@ namespace settings
     X(int, window_height, 900)                                     \
     X(int, window_xpos, 100)                                       \
     X(int, window_ypos, 100)                                       \
+    X(bool, reuse_window, true)                                    \
     X(bool, view_toolbar, true)                                    \
     X(bool, view_tree, true)                                       \
     X(bool, view_info, true)                                       \

@@ -26,9 +26,9 @@ if (APPLE AND DEFINED CMAKE_CXX_COMPILER AND NOT CMAKE_CXX_COMPILER MATCHES "^/u
 endif()
 
 if(APPLE)
-    project(step_viewer VERSION 1.0 LANGUAGES C CXX OBJC OBJCXX)
+    project(3D-Viewer VERSION 1.0 LANGUAGES C CXX OBJC OBJCXX)
 else()
-    project(step_viewer VERSION 1.0 LANGUAGES C CXX)
+    project(3D-Viewer VERSION 1.0 LANGUAGES C CXX)
 endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
@@ -164,5 +164,5 @@ add_subdirectory(src)
 add_executable(make_cad_models EXCLUDE_FROM_ALL tools/make_cad_models.cpp)
 target_link_libraries(make_cad_models PRIVATE occt_all)
 
-set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT step_viewer)
-set_property(TARGET step_viewer PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT 3D-Viewer)
+set_property(TARGET 3D-Viewer PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")

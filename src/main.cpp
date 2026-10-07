@@ -26,7 +26,10 @@
 #endif
 
 #include "model_check.h"
-#include "step_viewer.h"
+#include "settings.h"
+#include "single_instance.h"
+#include "util.h"
+#include "viewer.h"
 
 LOG_CONTEXT("main", info);
 
@@ -119,7 +122,17 @@ int main(int argc, char **argv)
         std::quick_exit(result);
     }
 
-    step_viewer window;
+    // reuse window: if one's running already, it opens the file (or just comes to the front)
+    {
+        settings_t settings;
+        settings.load(settings_path());
+        if(settings.reuse_window && single_instance::send_to_running(args.empty() ? std::filesystem::path() : args[0])) {
+            fflush(stdout);
+            std::quick_exit(0);
+        }
+    }
+
+    viewer window;
     window.init();
 
     // the first argument, if there is one, is a file to open

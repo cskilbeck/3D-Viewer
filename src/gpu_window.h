@@ -48,6 +48,12 @@ struct gpu_window
     {
     }
 
+    // events registered with SDL_RegisterEvents (or SDL_EVENT_USER)
+    virtual void on_user_event(SDL_Event const &event)
+    {
+        (void)event;
+    }
+
     virtual void on_drop(int count, const char **paths)
     {
     }
@@ -112,7 +118,7 @@ struct gpu_window
 };
 
 // SDL uses different key/button/action constants.
-// Define compatibility constants so step_viewer.cpp can use them.
+// Define compatibility constants so viewer.cpp can use them.
 namespace sdl_compat
 {
     // Actions (SDL uses events, not action codes, but we map to these)

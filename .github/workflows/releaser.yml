@@ -12,15 +12,15 @@ jobs:
           - os: windows-latest
             artifact_name: windows
             static_runtime: "ON"
-            binary_path: build/src/Release/step_viewer.exe
+            binary_path: build/src/Release/3D-Viewer.exe
           - os: macos-latest
             artifact_name: macos
             static_runtime: "OFF"
-            binary_path: build/src/step_viewer.app
+            binary_path: build/src/3D-Viewer.app
           - os: ubuntu-latest
             artifact_name: ubuntu
             static_runtime: "ON"
-            binary_path: build/src/step_viewer
+            binary_path: build/src/3D-Viewer
 
     runs-on: ${{ matrix.os }}
 
@@ -81,15 +81,15 @@ jobs:
       - name: Ad-hoc Sign (macOS)
         if: matrix.os == 'macos-latest'
         run: |
-          codesign --force --deep --sign - staging/step_viewer.app
+          codesign --force --deep --sign - staging/3D-Viewer.app
 
       - name: Strip Binaries (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
-        run: strip staging/step_viewer
+        run: strip staging/3D-Viewer
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: step_viewer-${{ matrix.artifact_name }}
+          name: 3D-Viewer-${{ matrix.artifact_name }}
           path: staging/
           if-no-files-found: error

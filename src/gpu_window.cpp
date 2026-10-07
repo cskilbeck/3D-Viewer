@@ -410,6 +410,12 @@ bool gpu_window::update()
                 on_drop(1, &path);
             }
         } break;
+
+        default:
+            if(event.type >= SDL_EVENT_USER && event.type <= SDL_EVENT_LAST) {
+                on_user_event(event);
+            }
+            break;
         }
     }
 

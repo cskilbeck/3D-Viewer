@@ -18,7 +18,7 @@
 
 //////////////////////////////////////////////////////////////////////
 
-struct step_viewer : gpu_window
+struct viewer : gpu_window
 {
     double last_frame_cpu_time{};
 
@@ -187,6 +187,13 @@ struct step_viewer : gpu_window
     void on_closed() override;
     void on_key(int key, int scancode, int action, int mods) override;
     void on_drop(int count, const char **paths) override;
+    void on_user_event(SDL_Event const &event) override;
+
+    // reuse window: another instance asked us to open a file (or just come to the front)
+    uint32_t open_request_event{};
+    bool listening{ false };
+    bool listen_failed{ false };    // another instance is listening, don't keep trying
+    void update_listening();
     void on_mouse_button(int button, int action, int mods) override;
     void on_mouse_move(double xpos, double ypos) override;
     void on_scroll(double xoffset, double yoffset) override;

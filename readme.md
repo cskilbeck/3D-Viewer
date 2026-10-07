@@ -86,7 +86,7 @@ Mesh formats have no CAD edges, so the sharp ones (where the surface bends by mo
 | Esc | Quit |
 | Ctrl+O | Open |
 
-A file can also be dropped on the window or passed on the command line. File > Open Recent has the last 10.
+A file can also be dropped on the window or passed on the command line. With **Reuse window** on (Settings > General, the default) opening a file while 3D Viewer is already running opens it in that window instead of starting another. File > Open Recent has the last 10.
 
 Rotation is turntable (Z stays up) by default, trackball (free rotation) is in the settings, as is orthographic projection.
 
@@ -94,14 +94,20 @@ Rotation is turntable (Z stays up) by default, trackball (free rotation) is in t
 
 View > Settings... opens the settings window (shading, anti-aliasing, transparency, projection, rotation style, grid, selection tint, zoom...). Changes take effect straight away; **Revert** goes back to how things were when the window was opened and **Defaults** resets everything.
 
-Settings (and the window position) are saved in `~/3DViewer.settings` (`%USERPROFILE%\3DViewer.settings` on Windows).
+Settings (and the window position) are saved in `3D-Viewer.settings` in the config directory, along with the window layout (`imgui.ini`) and, while it's running, the reuse window socket (`3D-Viewer-Active`):
+
+| | |
+|---|---|
+| Windows | `%LOCALAPPDATA%\3D-Viewer` |
+| macOS | `~/Library/Application Support/3D-Viewer` |
+| Linux | `~/.config/3D-Viewer` (or `$XDG_CONFIG_HOME/3D-Viewer`) |
 
 ## Testing
 
 `models/` has a small set of test files covering every format and feature, see [models/README.md](models/README.md). To check they all load as expected (no window, about a second):
 
 ```
-step_viewer --check models
+3D-Viewer --check models
 ```
 
 ## Build Instructions
@@ -127,8 +133,8 @@ One way to do this is open a Command Prompt and enter this (assuming your Visual
 
 ```
 > cd <your dev folder>
-> git clone https://github.com/cskilbeck/step_viewer
-> cd step_viewer
+> git clone https://github.com/cskilbeck/3D-Viewer
+> cd 3D-Viewer
 ```
 
 #### Build it
@@ -138,7 +144,7 @@ One way to do this is open a Command Prompt and enter this (assuming your Visual
 > cmake --build build
 ```
 
-The executable should be in `build/src/step_viewer.exe`
+The executable should be in `build/src/3D-Viewer.exe`
 
 #### Alternatively, if you want to use Visual Studio
 
@@ -174,13 +180,13 @@ Then, to build it:
 
 ```
 $ cd <your dev folder>
-$ git clone https://github.com/cskilbeck/step_viewer
-$ cd step_viewer
+$ git clone https://github.com/cskilbeck/3D-Viewer
+$ cd 3D-Viewer
 $ cmake -G Ninja -B build
 $ cmake --build build
 ```
 
-The result should be in `build/step_viewer`
+The result should be in `build/src/3D-Viewer` (or `build/src/3D-Viewer.app`)
 
 Note that debug builds create a bare executable, release builds create an app package.
 
@@ -238,13 +244,13 @@ $ sudo pacman -S base-devel cmake ninja pkgconf \
 #### Clone and build
 
 ```
-$ git clone https://github.com/cskilbeck/step_viewer
-$ cd step_viewer
+$ git clone https://github.com/cskilbeck/3D-Viewer
+$ cd 3D-Viewer
 $ cmake -G Ninja -B build
 $ cmake --build build
 ```
 
-The executable will be at `build/src/step_viewer`.
+The executable will be at `build/src/3D-Viewer`.
 
 The first configure pulls down a handful of dependencies via CMake FetchContent (SDL3, Dear ImGui, nativefiledialog-extended, nlohmann/json, stb and cmrc). It takes a few minutes the first time; subsequent builds are incremental.
 

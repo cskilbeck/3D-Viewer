@@ -17,9 +17,9 @@
 
 //////////////////////////////////////////////////////////////////////
 
-char const *app_name{ "step_viewer" };
+char const *app_name{ "3D-Viewer" };
 char const *app_friendly_name{ "3D Viewer" };
-char const *settings_filename{ "3DViewer.settings" };
+char const *settings_filename{ "3D-Viewer.settings" };
 
 #if !defined(_WIN32)
 #include <pwd.h>
@@ -133,9 +133,10 @@ std::filesystem::path home_path()
 
 //////////////////////////////////////////////////////////////////////
 
+// in the config directory with everything else (imgui.ini, the reuse window socket)
 std::filesystem::path settings_path()
 {
-    return home_path() / settings_filename;
+    return config_path(app_name, settings_filename);
 }
 
 //////////////////////////////////////////////////////////////////////
