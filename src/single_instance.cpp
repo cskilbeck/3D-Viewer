@@ -15,6 +15,7 @@
 #endif
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <string>
 #include <thread>
@@ -192,27 +193,41 @@ bool single_instance::start_listening(std::function<void(std::filesystem::path c
     listen_socket = s;
     stopping = false;
 
-    // polls so it can notice it's being stopped (closing the socket doesn't wake accept() everywhere)
+    // waits for connections with no timeout, so it costs nothing while it's idle: stop_listening()
+    // wakes it up by connecting itself (closing the socket doesn't wake accept() everywhere)
     listener = std::thread([s, on_request] {
-        while(!stopping) {
-            if(poll_socket(s, 200) <= 0) {
-                continue;
-            }
+        while(true) {
             socket_t client = accept(s, nullptr, nullptr);
+            if(stopping) {
+                if(client != no_socket) {
+                    close_socket(client);
+                }
+                break;
+            }
             if(client == no_socket) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));    // shouldn't happen, but don't spin
                 continue;
             }
+
+            // a request is everything up to the other end closing the connection, if it doesn't
+            // (or something goes wrong) it's ignored rather than acted on
             std::string request;
+            bool complete = false;
             char buffer[1024];
-            while(poll_socket(client, 1000) > 0) {
+            while(request.size() <= 65536 && poll_socket(client, 1000) > 0) {
                 int got = (int)recv(client, buffer, (int)sizeof(buffer), 0);
-                if(got <= 0 || request.size() > 65536) {
+                if(got <= 0) {
+                    complete = got == 0;
                     break;
                 }
                 request.append(buffer, (size_t)got);
             }
             close_socket(client);
-            on_request(std::filesystem::path(std::u8string(request.begin(), request.end())));
+            if(complete) {
+                on_request(std::filesystem::path(std::u8string(request.begin(), request.end())));
+            } else {
+                LOG_WARNING("Ignoring an incomplete request from another instance");
+            }
         }
     });
     return true;
@@ -225,11 +240,27 @@ void single_instance::stop_listening()
     if(listen_socket == no_socket) {
         return;
     }
+    // wake the listener up so it sees it's stopping
     stopping = true;
-    if(listener.joinable()) {
-        listener.join();
+    socket_t wake = connect_to_running();
+    if(wake != no_socket) {
+        close_socket(wake);
+        if(listener.joinable()) {
+            listener.join();
+        }
+        close_socket(listen_socket);
+    } else {
+        // can't connect (the socket file's gone?) so it might never wake up: don't wait for it
+#if defined(_WIN32)
+        shutdown(listen_socket, SD_BOTH);
+#else
+        shutdown(listen_socket, SHUT_RDWR);
+#endif
+        close_socket(listen_socket);
+        if(listener.joinable()) {
+            listener.detach();
+        }
     }
-    close_socket(listen_socket);
     listen_socket = no_socket;
     std::error_code error;
     std::filesystem::remove(socket_path(), error);
